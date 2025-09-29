@@ -1,0 +1,14 @@
+# Speed up docker builds by excluding unneeded files from the context
+.git
+.gitignore
+docker-compose.yml
+README.md
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+.env
+data/
+*.iml
+.idea/
+*.swp

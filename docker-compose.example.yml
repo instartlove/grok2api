@@ -1,0 +1,26 @@
+services:
+  grok2api:
+    build: .
+    container_name: grok2api
+    environment:
+      # Placeholders below — set real values in a local .env or docker-compose.yml that is gitignored
+      - API_KEY=${API_KEY:-CHANGE_ME}
+      - IS_TEMP_CONVERSATION=true
+      - SHOW_SEARCH_RESULTS=true
+      - SHOW_THINKING=true
+      - DISABLE_DYNAMIC_HEADERS=true
+      - MANAGER_SWITCH=true
+      - ADMINPASSWORD=${ADMINPASSWORD:-CHANGE_ME}
+      # Proxy settings (example format only)
+      - "PROXY=${PROXY:-http://proxy_user:proxy_password@host:port}"
+      # Dynamic proxy API (example only)
+      - "DYNAMIC_PROXY_API=${DYNAMIC_PROXY_API:-https://proxy.example.com/random/us?protocol=http&host=us.proxy302.com&api_key=CHANGE_ME}"
+      - PROXY_RETRY_LIMIT=${PROXY_RETRY_LIMIT:-20}
+      - PROXY_VALIDATE_URL=${PROXY_VALIDATE_URL:-https://grok.com/}
+      - PROXY_VALIDATE_TIMEOUT=${PROXY_VALIDATE_TIMEOUT:-15}
+      # Request timeout
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-180}
+    volumes:
+      - ./data:/data
+    ports:
+      - 5200:5200

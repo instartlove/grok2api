@@ -1,0 +1,7 @@
+flask
+requests
+curl_cffi
+werkzeug
+loguru
+python-dotenv
+playwright
