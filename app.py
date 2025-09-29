@@ -14,6 +14,7 @@ import functools
 import re
 import threading
 from dataclasses import dataclass, field
+import math
 from typing import List, Optional, Any, Dict, Union, Tuple, Iterator
 from pathlib import Path
 from contextlib import contextmanager
@@ -1027,7 +1028,7 @@ class ConfigurationManager:
 
     def __init__(self):
         """Initialize configuration with environment variables."""
-        self.data_dir = Path("/data")
+        self.data_dir = Path("./data")
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self._config = self._load_configuration()
@@ -1634,17 +1635,7 @@ class ThreadSafeTokenManager:
         self._lock = threading.RLock()
         self._token_storage: Dict[str, List[TokenEntry]] = {}
         self._token_status: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        self._expired_tokens: List[Tuple[str, str, int, TokenType]] = []
-
-        self._super_limits = {
-            "grok-3": ModelLimits(100, 3 * 60 * 60 * 1000),
-            "grok-4": ModelLimits(20, 3 * 60 * 60 * 1000),
-        }
-
-        self._normal_limits = {
-            "grok-4": ModelLimits(5, int(11.5 * 60 * 60 * 1000)),
-            "grok-3": ModelLimits(20, 3 * 60 * 60 * 1000),
-        }
+        self._expiredTokens: List[Tuple[str, str, int, TokenType]] = []
 
         self._reset_timer_started = False
         self._load_token_status()
@@ -1668,26 +1659,22 @@ class ThreadSafeTokenManager:
             return f"{parts[0]}-{parts[1]}" if len(parts) >= 2 else mapped
         return mapped
 
-    def _get_model_limits(self, token_type: TokenType) -> Dict[str, ModelLimits]:
-        """Get model limits based on token type."""
-        return (
-            self._super_limits if token_type == TokenType.SUPER else self._normal_limits
-        )
-
     def _save_token_status(self) -> None:
         """Save token status to persistent storage."""
         try:
             status_file = Path(self.config.get("TOKEN_STATUS_FILE"))
             with open(status_file, "w", encoding="utf-8") as f:
                 json.dump(self._token_status, f, indent=2, ensure_ascii=False)
-            print("Token status saved to file")
+            print(f"Token status saved to file: {status_file}")
         except Exception as e:
             print(f"Failed to save token status: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _load_token_status(self) -> None:
         """Load token status from persistent storage and reconstruct token storage."""
         try:
-            status_file = Path(self.config.get("TOKEN_STATUS_FILE"))  # /data/token_status.json
+            status_file = Path(self.config.get("TOKEN_STATUS_FILE"))  # ./data/token_status.json
             fallback_file = Path("data/token_status.json")            # ./data/token_status.json
             load_path = None
 
@@ -1708,51 +1695,97 @@ class ThreadSafeTokenManager:
             self._token_status = {}
 
     def _reconstruct_token_storage(self) -> None:
-        """Reconstruct _token_storage from _token_status."""
+        """Reconstruct _token_storage from _token_status.
+
+        Note: In the new quota-based system, _token_storage is largely deprecated,
+        but we keep this method for backward compatibility.
+        """
         try:
             reconstructed_count = 0
-            for sso_value, models_data in self._token_status.items():
-                for model, model_data in models_data.items():
+            for sso_value, token_data in self._token_status.items():
+                # In the new structure, token information is stored at the top level
+                # We don't need to reconstruct individual model entries since we use quota-based system
 
-                    is_super = model_data.get("isSuper", False)
-                    token_type = TokenType.SUPER if is_super else TokenType.NORMAL
+                # Skip if this doesn't look like a valid token structure
+                if not isinstance(token_data, dict) or "quota" not in token_data:
+                    continue
 
-                    credential = TokenCredential.from_raw_token(sso_value, token_type)
-
-                    token_entry = TokenEntry(
-                        credential=credential,
-                        max_request_count=model_data.get("max_request_count", 20),
-                        request_count=model_data.get("request_count", 0),
-                        added_time=model_data.get(
-                            "added_time", int(time.time() * 1000)
-                        ),
-                        start_call_time=model_data.get("start_call_time"),
-                    )
-
-                    if model_data.get("is_expired", False):
-                        print(f"Skipping expired token for {model}")
-                        continue
-
-                    if model not in self._token_storage:
-                        self._token_storage[model] = []
-
-                    existing = next(
-                        (
-                            entry
-                            for entry in self._token_storage[model]
-                            if entry.credential.sso_token == credential.sso_token
-                        ),
-                        None,
-                    )
-
-                    if not existing:
-                        self._token_storage[model].append(token_entry)
-                        reconstructed_count += 1
+                # For backward compatibility, we might still need to handle legacy model-based entries
+                # but in the new system, we primarily rely on quota-based validation
+                reconstructed_count += 1
 
             if reconstructed_count > 0:
-                print(f"Reconstructed {reconstructed_count} token entries")
+                print(f"Reconstructed {reconstructed_count} token entries using quota-based system")
         except Exception as e:
             print(f"Failed to reconstruct token storage: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _ensure_quota_defaults_for_all(self) -> None:
+        """Ensure every token in status map has default quota/counts for UI display.
+
+        This is mainly for backward-compatibility when loading older token_status.json
+        which does not have the new quota/counts structure yet.
+        """
+        try:
+            changed = False
+            for sso_value, token_data in self._token_status.items():
+                # Ensure we're working with a valid dict structure
+                if not isinstance(token_data, dict):
+                    print(f"Invalid token data structure for {sso_value}")
+                    continue
+
+                quota = token_data.get("quota")
+                counts = token_data.get("counts")
+
+                if quota is None or counts is None:
+                    # Default: 80 total/remaining points
+                    remaining = 80
+                    total = 80
+                    fast_counts = int(math.floor(remaining / 1))
+                    expert_counts = int(math.floor(remaining / 4))
+                    imagegen_counts = int(math.floor(remaining / 4))
+
+                    self._token_status[sso_value]["quota"] = {
+                        "windowSizeSeconds": None,
+                        "totalTokens": total,
+                        "remainingTokens": remaining,
+                        "updatedAt": int(time.time() * 1000),
+                    }
+                    self._token_status[sso_value]["counts"] = {
+                        "fast": fast_counts,
+                        "expert": expert_counts,
+                        "imageGen": imagegen_counts,
+                    }
+
+                    # Initialize modelStats if missing
+                    if "modelStats" not in self._token_status[sso_value]:
+                        self._token_status[sso_value]["modelStats"] = {}
+                        for model_type in ModelType:
+                            self._token_status[sso_value]["modelStats"][model_type.value] = {
+                                "lastCallTime": None,
+                                "requestCount": 0,
+                                "failureCount": 0,
+                                "lastFailureTime": None,
+                                "lastFailureResponse": None
+                            }
+
+                    # Ensure basic status fields exist
+                    if "isSuper" not in self._token_status[sso_value]:
+                        self._token_status[sso_value]["isSuper"] = False
+                    if "isExpired" not in self._token_status[sso_value]:
+                        self._token_status[sso_value]["isExpired"] = False
+                    if "isValid" not in self._token_status[sso_value]:
+                        self._token_status[sso_value]["isValid"] = True
+
+                    changed = True
+
+            if changed:
+                self._save_token_status()
+        except Exception as e:
+            print(f"Failed to ensure default quotas: {e}")
+            import traceback
+            traceback.print_exc()
 
     def record_token_failure(
         self, model: str, token_string: str, failure_reason: str, status_code: int
@@ -1760,37 +1793,47 @@ class ThreadSafeTokenManager:
         """Record a token failure and potentially mark as expired."""
         with self._lock:
             try:
-                normalized_model = self._normalize_model_name(model)
                 credential = TokenCredential(token_string, TokenType.NORMAL)
                 sso_value = credential.extract_sso_value()
 
-                if (
-                    sso_value in self._token_status
-                    and normalized_model in self._token_status[sso_value]
-                ):
-                    status = self._token_status[sso_value][normalized_model]
-                    status["failed_request_count"] = (
-                        status.get("failed_request_count", 0) + 1
-                    )
-                    status["last_failure_time"] = int(time.time() * 1000)
-                    status["last_failure_reason"] = f"{status_code}: {failure_reason}"
+                if sso_value not in self._token_status:
+                    return
 
-                    failure_threshold = 3
-                    if status[
-                        "failed_request_count"
-                    ] >= failure_threshold and status_code in [401, 403]:
-                        status["is_expired"] = True
-                        status["isValid"] = False
-                        print(
-                            f"Token marked as expired after {status['failed_request_count']} failures: {failure_reason}",
-                            "TokenManager",
-                        )
+                token_data = self._token_status[sso_value]
 
-                    self._save_token_status()
+                # 更新modelStats统计 - 使用原始模型名
+                if "modelStats" not in token_data:
+                    token_data["modelStats"] = {}
+
+                model_stats = token_data["modelStats"]
+                if model not in model_stats:
+                    model_stats[model] = {
+                        "lastCallTime": None,
+                        "requestCount": 0,
+                        "failureCount": 0,
+                        "lastFailureTime": None,
+                        "lastFailureResponse": None
+                    }
+
+                model_stats[model]["failureCount"] += 1
+                model_stats[model]["lastFailureTime"] = int(time.time() * 1000)
+                model_stats[model]["lastFailureResponse"] = f"{status_code}: {failure_reason}"
+
+                # 检查失败阈值，基于modelStats数据
+                failure_threshold = 3
+                if model_stats[model]["failureCount"] >= failure_threshold and status_code in [401, 403]:
+                    token_data["isExpired"] = True
+                    token_data["isValid"] = False
                     print(
-                        f"Recorded token failure for {model}: {failure_reason} (total failures: {status['failed_request_count']})",
+                        f"Token marked as expired after {model_stats[model]['failureCount']} failures: {failure_reason}",
                         "TokenManager",
                     )
+
+                self._save_token_status()
+                print(
+                    f"Recorded token failure for {model}: {failure_reason} (total failures: {model_stats[model]['failureCount']})",
+                    "TokenManager",
+                )
 
             except Exception as e:
                 print(f"Failed to record token failure: {e}")
@@ -1804,7 +1847,7 @@ class ThreadSafeTokenManager:
                 and model in self._token_status[sso_value]
             ):
                 status = self._token_status[sso_value][model]
-                return status.get("is_expired", False)
+                return status.get("isExpired", False)
             return False
         except Exception as e:
             print(f"Failed to check token expiration: {e}")
@@ -1816,49 +1859,42 @@ class ThreadSafeTokenManager:
         """Add token to the management system."""
         with self._lock:
             try:
-                model_limits = self._get_model_limits(credential.token_type)
                 sso_value = credential.extract_sso_value()
 
-                for model, limits in model_limits.items():
-                    if model not in self._token_storage:
-                        self._token_storage[model] = []
+                # Initialize token status bucket with quota and modelStats
+                if sso_value not in self._token_status:
+                    self._token_status[sso_value] = {}
 
-                    existing_entry = next(
-                        (
-                            entry
-                            for entry in self._token_storage[model]
-                            if entry.credential.sso_token == credential.sso_token
-                        ),
-                        None,
-                    )
+                    # Initialize shared quota (points system)
+                    self._token_status[sso_value]["quota"] = {
+                        "windowSizeSeconds": None,
+                        "totalTokens": 80,
+                        "remainingTokens": 80,
+                        "updatedAt": int(time.time() * 1000),
+                    }
 
-                    if not existing_entry:
-                        token_entry = TokenEntry(
-                            credential=credential,
-                            max_request_count=limits.request_frequency,
-                            request_count=0,
-                            added_time=int(time.time() * 1000),
-                        )
-                        self._token_storage[model].append(token_entry)
+                    # Initialize counts for different model types
+                    self._token_status[sso_value]["counts"] = {
+                        "fast": 80,
+                        "expert": 20,
+                        "imageGen": 20,
+                    }
 
-                        if sso_value not in self._token_status:
-                            self._token_status[sso_value] = {}
+                    # Initialize basic status fields
+                    self._token_status[sso_value]["isSuper"] = credential.token_type == TokenType.SUPER
+                    self._token_status[sso_value]["isExpired"] = False
+                    self._token_status[sso_value]["isValid"] = True
 
-                        if model not in self._token_status[sso_value]:
-                            self._token_status[sso_value][model] = {
-                                "isValid": True,
-                                "invalidatedTime": None,
-                                "totalRequestCount": 0,
-                                "isSuper": credential.token_type == TokenType.SUPER,
-                                "max_request_count": limits.request_frequency,
-                                "request_count": 0,
-                                "added_time": token_entry.added_time,
-                                "start_call_time": None,
-                                "failed_request_count": 0,
-                                "is_expired": False,
-                                "last_failure_time": None,
-                                "last_failure_reason": None,
-                            }
+                    # Initialize modelStats for all available models
+                    self._token_status[sso_value]["modelStats"] = {}
+                    for model_type in ModelType:
+                        self._token_status[sso_value]["modelStats"][model_type.value] = {
+                            "lastCallTime": None,
+                            "requestCount": 0,
+                            "failureCount": 0,
+                            "lastFailureTime": None,
+                            "lastFailureResponse": None
+                        }
 
                 if not is_initialization:
                     self._save_token_status()
@@ -1873,53 +1909,98 @@ class ThreadSafeTokenManager:
                 print(f"Failed to add token: {e}")
                 return False
 
+    def _is_token_valid_for_model(self, token_entry: TokenEntry, model: str) -> bool:
+        """Check if token is valid for specific model considering both rate limits and quota.
+
+        New validation logic:
+        - Check if token is expired (original logic)
+        - Check if token is rate limited (original logic)
+        - Check if token has sufficient quota for model type (new logic)
+        """
+        try:
+            # Check if token is expired
+            if self._is_token_expired(token_entry, model):
+                return False
+
+            sso_value = token_entry.credential.extract_sso_value()
+            if sso_value not in self._token_status:
+                return False
+
+            # Check model-specific rate limiting (original logic)
+            if model in self._token_status[sso_value]:
+                model_status = self._token_status[sso_value][model]
+                if not model_status.get("isValid", True):
+                    return False
+
+            # Check quota-based validity (new logic)
+            quota_data = self._token_status[sso_value].get("quota", {})
+            remaining_tokens = quota_data.get("remainingTokens", 0)
+
+            # Determine required tokens for this model
+            required_tokens = 4 if model.endswith(("-expert", "-imageGen")) else 1
+
+            # Token is invalid if insufficient quota
+            if remaining_tokens < required_tokens:
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"Error checking token validity: {e}")
+            return False
+
     def get_token_for_model(self, model: str) -> Optional[str]:
-        """Get available token for specified model."""
+        """Get available token for specified model using quota-based validation."""
         with self._lock:
-            normalized_model = self._normalize_model_name(model)
-
-            if normalized_model not in self._token_storage:
-                return None
-
-            tokens = self._token_storage[normalized_model]
-            if not tokens:
-                return None
-
-            for token_entry in tokens:
-
-                if self._is_token_expired(token_entry, normalized_model):
+            # In the new quota-based system, we select from available tokens directly
+            for sso_value, token_data in self._token_status.items():
+                if not isinstance(token_data, dict):
                     continue
 
-                if token_entry.is_available():
-                    token_entry.use_token()
+                # Check if token is valid and not expired
+                if token_data.get("isExpired", False) or not token_data.get("isValid", True):
+                    continue
 
-                    try:
-                        sso_value = token_entry.credential.extract_sso_value()
-                        if (
-                            sso_value in self._token_status
-                            and normalized_model in self._token_status[sso_value]
-                        ):
-                            status = self._token_status[sso_value][normalized_model]
-                            status["totalRequestCount"] += 1
-                            status["request_count"] = token_entry.request_count
-                            status["start_call_time"] = token_entry.start_call_time
+                # Check quota availability for this model type
+                quota_data = token_data.get("quota", {})
+                remaining_tokens = quota_data.get("remainingTokens", 0)
 
-                            if (
-                                token_entry.request_count
-                                >= token_entry.max_request_count
-                            ):
-                                status["isValid"] = False
-                                status["invalidatedTime"] = int(time.time() * 1000)
+                # Determine required tokens for this model (use original model name)
+                if model.endswith(("-expert", "-imageGen")):
+                    required_tokens = 4
+                else:
+                    required_tokens = 1
 
-                    except Exception as e:
-                        print(f"Failed to update token status: {e}")
+                # Check if sufficient quota
+                if remaining_tokens < required_tokens:
+                    continue
 
-                    if not self._reset_timer_started:
-                        self._start_reset_timer()
+                # Found a valid token with sufficient quota
+                # Construct the token string
+                token_string = f"sso-rw={sso_value};sso={sso_value}"
+
+                # Update model stats for tracking (use original model name, not normalized)
+                try:
+                    model_stats = token_data.get("modelStats", {})
+                    if model not in model_stats:
+                        model_stats[model] = {
+                            "lastCallTime": None,
+                            "requestCount": 0,
+                            "failureCount": 0,
+                            "lastFailureTime": None,
+                            "lastFailureResponse": None
+                        }
+
+                    model_stats[model]["lastCallTime"] = int(time.time() * 1000)
+                    model_stats[model]["requestCount"] += 1
 
                     self._save_token_status()
-                    return token_entry.credential.sso_token
+                except Exception as e:
+                    print(f"Failed to update model stats: {e}")
 
+                return token_string
+
+            print(f"No available tokens found for model: {model}")
             return None
 
     def remove_token_from_model(self, model: str, token_string: str) -> bool:
@@ -1935,7 +2016,7 @@ class ThreadSafeTokenManager:
                 if token_entry.credential.sso_token == token_string:
                     removed_entry = tokens.pop(i)
 
-                    self._expired_tokens.append(
+                    self._expiredTokens.append(
                         (
                             token_string,
                             normalized_model,
@@ -1950,30 +2031,71 @@ class ThreadSafeTokenManager:
             return False
 
     def get_token_count_for_model(self, model: str) -> int:
-        """Get available token count for model."""
+        """Get available token count for model using quota-based validation."""
         with self._lock:
-            normalized_model = self._normalize_model_name(model)
-            if normalized_model not in self._token_storage:
-                return 0
-            return len(self._token_storage[normalized_model])
+            count = 0
+
+            # Determine required tokens for this model (use original model name)
+            if model.endswith(("-expert", "-imageGen")):
+                required_tokens = 4
+            else:
+                required_tokens = 1
+
+            for sso_value, token_data in self._token_status.items():
+                if not isinstance(token_data, dict):
+                    continue
+
+                # Check if token is valid and not expired
+                if token_data.get("isExpired", False) or not token_data.get("isValid", True):
+                    continue
+
+                # Check quota availability
+                quota_data = token_data.get("quota", {})
+                remaining_tokens = quota_data.get("remainingTokens", 0)
+
+                if remaining_tokens >= required_tokens:
+                    count += 1
+
+            return count
 
     def rotate_token(self, model: str, token_string: str) -> None:
-        """Move a token to the end of the list for this model to encourage switching.
+        """Mark a token as having issues for this model (quota-based system).
 
-        Used after receiving a 429 to make the next acquisition pick a different token.
+        Used after receiving a 429 to discourage using this token temporarily.
+        In the new quota system, we record this as a failure statistic.
         """
         with self._lock:
             try:
-                normalized_model = self._normalize_model_name(model)
-                if normalized_model not in self._token_storage:
+                # Extract SSO value from token string
+                if "sso=" in token_string:
+                    sso_value = token_string.split("sso=")[1].split(";")[0]
+                else:
+                    print(f"Invalid token format for rotation: {token_string}")
                     return
-                tokens = self._token_storage[normalized_model]
-                for i, token_entry in enumerate(tokens):
-                    if token_entry.credential.sso_token == token_string:
-                        entry = tokens.pop(i)
-                        tokens.append(entry)
-                        print(f"Rotated token to end for {normalized_model}", "TokenManager")
-                        break
+
+                if sso_value not in self._token_status:
+                    return
+
+                token_data = self._token_status[sso_value]
+
+                # Add to model stats as a soft failure (rate limit) - use original model name
+                model_stats = token_data.get("modelStats", {})
+                if model not in model_stats:
+                    model_stats[model] = {
+                        "lastCallTime": None,
+                        "requestCount": 0,
+                        "failureCount": 0,
+                        "lastFailureTime": None,
+                        "lastFailureResponse": None
+                    }
+
+                model_stats[model]["failureCount"] += 1
+                model_stats[model]["lastFailureTime"] = int(time.time() * 1000)
+                model_stats[model]["lastFailureResponse"] = "429: Rate limited"
+
+                self._save_token_status()
+                print(f"Marked token for potential rate limiting on {model}", "TokenManager")
+
             except Exception as e:
                 print(f"Failed to rotate token: {e}")
 
@@ -1988,6 +2110,125 @@ class ThreadSafeTokenManager:
                 capacity_map[model] = max(0, total_capacity - used_requests)
 
             return capacity_map
+
+    # --- Quota reset helpers for manager ---
+    def reset_token_quota(
+        self, sso_value: str, remaining: Optional[int] = None, total: Optional[int] = None
+    ) -> bool:
+        """Reset quota for a single token and persist to file.
+
+        If `remaining` is None, it resets to `total` (or existing total, or 80).
+        If `total` is None, keep existing total (or 80).
+        Also resets isExpired and isValid status.
+        """
+        try:
+            with self._lock:
+                if sso_value not in self._token_status:
+                    return False
+
+                models_data = self._token_status[sso_value]
+                quota = models_data.get("quota", {})
+                cur_total = int(quota.get("totalTokens", 80) or 80)
+                new_total = int(total) if total is not None else cur_total
+                new_remaining = (
+                    int(remaining)
+                    if remaining is not None
+                    else new_total
+                )
+                new_remaining = max(0, new_remaining)
+
+                # 计算各模式可用次数
+                fast_counts = int(math.floor(new_remaining / 1))
+                expert_counts = int(math.floor(new_remaining / 4))
+                imagegen_counts = int(math.floor(new_remaining / 4))
+
+                models_data["quota"] = {
+                    "windowSizeSeconds": quota.get("windowSizeSeconds"),
+                    "totalTokens": new_total,
+                    "remainingTokens": new_remaining,
+                    "updatedAt": int(time.time() * 1000),
+                }
+                models_data["counts"] = {
+                    "fast": fast_counts,
+                    "expert": expert_counts,
+                    "imageGen": imagegen_counts,
+                }
+
+                # 重置所有模型的状态
+                for model, model_data in models_data.items():
+                    if isinstance(model_data, dict) and not model.startswith("__"):
+                        model_data["isExpired"] = False
+                        model_data["isValid"] = True  # 重置为有效状态
+                        model_data["failed_request_count"] = 0
+                        model_data["last_failure_time"] = None
+                        model_data["last_failure_reason"] = None
+
+                self._save_token_status()
+                return True
+        except Exception as e:
+            print(f"Failed to reset token quota: {e}")
+            return False
+
+    def reset_all_quotas(
+        self, remaining: Optional[int] = None, total: Optional[int] = None
+    ) -> int:
+        """Reset quotas for all tokens. Returns number of tokens updated."""
+        try:
+            updated = 0
+            with self._lock:
+                for sso_value in list(self._token_status.keys()):
+                    try:
+                        models_data = self._token_status[sso_value]
+                        quota = models_data.get("quota", {})
+                        cur_total = int(quota.get("totalTokens", 80) or 80)
+                        new_total = int(total) if total is not None else cur_total
+                        new_remaining = (
+                            int(remaining)
+                            if remaining is not None
+                            else new_total
+                        )
+                        new_remaining = max(0, new_remaining)
+
+                        # 计算各模式可用次数
+                        fast_counts = int(math.floor(new_remaining / 1))
+                        expert_counts = int(math.floor(new_remaining / 4))
+                        imagegen_counts = int(math.floor(new_remaining / 4))
+
+                        models_data["quota"] = {
+                            "windowSizeSeconds": quota.get("windowSizeSeconds"),
+                            "totalTokens": new_total,
+                            "remainingTokens": new_remaining,
+                            "updatedAt": int(time.time() * 1000),
+                        }
+                        models_data["counts"] = {
+                            "fast": fast_counts,
+                            "expert": expert_counts,
+                            "imageGen": imagegen_counts,
+                        }
+
+                        # 重置所有模型的状态
+                        for model, model_data in models_data.items():
+                            if isinstance(model_data, dict) and not model.startswith("__"):
+                                model_data["isExpired"] = False
+                                model_data["isValid"] = True  # 重置为有效状态
+                                model_data["failed_request_count"] = 0
+                                model_data["last_failure_time"] = None
+                                model_data["last_failure_reason"] = None
+
+                        updated += 1
+                    except Exception as e:
+                        print(f"Failed to reset quota for {sso_value}: {e}")
+                        continue
+
+                # 批量保存一次，避免频繁写入
+                if updated > 0:
+                    self._save_token_status()
+                    print(f"Successfully reset quotas for {updated} tokens")
+
+            return updated
+        except Exception as e:
+            print(f"Failed to reset all quotas: {e}")
+            return 0
 
     def reduce_token_request_count(self, model: str, count: int) -> bool:
         """Reduce token request count (for error recovery)."""
@@ -2025,130 +2266,34 @@ class ThreadSafeTokenManager:
             return True
 
     def _start_reset_timer(self) -> None:
-        """Start the token reset timer."""
+        """Start a simple cleanup timer for expired tokens."""
 
-        def reset_expired_tokens():
+        def cleanup_expired():
             while True:
                 try:
-                    current_time = int(time.time() * 1000)
+                    # Simple cleanup every hour
+                    time.sleep(3600)
 
                     with self._lock:
-                        tokens_to_remove = []
-                        for token_info in self._expired_tokens:
-                            token, model, expired_time, token_type = token_info
-                            model_limits = self._get_model_limits(token_type)
+                        # Clean up expired tokens list periodically
+                        current_time = int(time.time() * 1000)
+                        # Keep only recent expired tokens (last 24 hours)
+                        one_day_ms = 24 * 60 * 60 * 1000
+                        self._expiredTokens = [
+                            token_info for token_info in self._expiredTokens
+                            if current_time - token_info[2] < one_day_ms
+                        ]
 
-                            if model in model_limits:
-                                expiration_time = model_limits[model].expiration_time_ms
-
-                                if current_time - expired_time >= expiration_time:
-                                    try:
-                                        credential = TokenCredential(token, token_type)
-                                        self._reactivate_token(
-                                            model, credential, model_limits[model]
-                                        )
-                                        tokens_to_remove.append(token_info)
-                                    except Exception as e:
-                                        print(
-                                            f"Failed to reactivate token: {e}",
-                                            "TokenManager",
-                                        )
-
-                        for token_info in tokens_to_remove:
-                            self._expired_tokens.remove(token_info)
-
-                        for model, tokens in self._token_storage.items():
-                            for token_entry in tokens:
-                                token_type = token_entry.credential.token_type
-                                model_limits = self._get_model_limits(token_type)
-
-                                if model in model_limits:
-                                    if token_entry.can_be_reset(
-                                        model_limits[model].expiration_time_ms,
-                                        current_time,
-                                    ):
-                                        token_entry.reset_usage()
-
-                                        try:
-                                            sso_value = (
-                                                token_entry.credential.extract_sso_value()
-                                            )
-                                            if (
-                                                sso_value in self._token_status
-                                                and model
-                                                in self._token_status[sso_value]
-                                            ):
-                                                status = self._token_status[sso_value][
-                                                    model
-                                                ]
-                                                status["isValid"] = True
-                                                status["invalidatedTime"] = None
-                                                status["totalRequestCount"] = 0
-                                                status["request_count"] = (
-                                                    token_entry.request_count
-                                                )
-                                                status["start_call_time"] = (
-                                                    token_entry.start_call_time
-                                                )
-                                        except Exception as e:
-                                            print(
-                                                f"Failed to update status during reset: {e}",
-                                                "TokenManager",
-                                            )
-
+                        # The quota-based system handles token validity automatically
+                        # No need for complex model-based resets anymore
                         self._save_token_status()
 
                 except Exception as e:
-                    print(f"Error in token reset timer: {e}")
+                    print(f"Error in cleanup timer: {e}")
 
-                time.sleep(3600)
-
-        timer_thread = threading.Thread(target=reset_expired_tokens, daemon=True)
+        timer_thread = threading.Thread(target=cleanup_expired, daemon=True)
         timer_thread.start()
         self._reset_timer_started = True
-
-    def _reactivate_token(
-        self, model: str, credential: TokenCredential, limits: ModelLimits
-    ) -> None:
-        """Reactivate an expired token."""
-        existing = next(
-            (
-                entry
-                for entry in self._token_storage.get(model, [])
-                if entry.credential.sso_token == credential.sso_token
-            ),
-            None,
-        )
-
-        if not existing:
-            if model not in self._token_storage:
-                self._token_storage[model] = []
-
-            token_entry = TokenEntry(
-                credential=credential,
-                max_request_count=limits.request_frequency,
-                request_count=0,
-                added_time=int(time.time() * 1000),
-            )
-            self._token_storage[model].append(token_entry)
-
-            try:
-                sso_value = credential.extract_sso_value()
-                if sso_value in self._token_status:
-                    if model not in self._token_status[sso_value]:
-                        self._token_status[sso_value][model] = {}
-
-                    status = self._token_status[sso_value][model]
-                    status["isValid"] = True
-                    status["invalidatedTime"] = None
-                    status["totalRequestCount"] = 0
-                    status["isSuper"] = credential.token_type == TokenType.SUPER
-                    status["max_request_count"] = token_entry.max_request_count
-                    status["request_count"] = token_entry.request_count
-                    status["added_time"] = token_entry.added_time
-                    status["start_call_time"] = token_entry.start_call_time
-            except Exception as e:
-                print(f"Failed to update reactivated token status: {e}")
 
     def delete_token(self, token_string: str) -> bool:
         """Delete token completely from the system."""
@@ -2172,9 +2317,9 @@ class ThreadSafeTokenManager:
                 if sso_value in self._token_status:
                     del self._token_status[sso_value]
 
-                self._expired_tokens = [
+                self._expiredTokens = [
                     token_info
-                    for token_info in self._expired_tokens
+                    for token_info in self._expiredTokens
                     if token_info[0] != token_string
                 ]
 
@@ -2203,62 +2348,84 @@ class ThreadSafeTokenManager:
             return dict(self._token_status)
 
     def get_token_health_summary(self) -> Dict[str, Any]:
-        """Get summary of token health across all models."""
+        """Get summary of token health across all models with enhanced quota-based logic."""
         with self._lock:
             summary = {
                 "total_tokens": 0,
-                "healthy_tokens": 0,
-                "expired_tokens": 0,
-                "rate_limited_tokens": 0,
-                "tokens_with_failures": 0,
-                "total_failures": 0,
-                "by_model": {},
+                "healthyTokens": 0,
+                "expiredTokens": 0,
+                "rateLimitedTokens": 0,
+                "lowQuotaTokens": 0,  # 新增：低额度token数量
+                "tokensWithFailures": 0,
+                "totalFailures": 0,
+                "byModel": {},
             }
 
             unique_tokens = set()
             token_health_status = {}
 
-            for sso_value, models_data in self._token_status.items():
+            for sso_value, token_data in self._token_status.items():
                 unique_tokens.add(sso_value)
 
-                is_expired = False
-                is_rate_limited = False
-                has_failures = False
-                total_token_failures = 0
+                # Ensure we're working with a valid dict structure
+                if not isinstance(token_data, dict):
+                    print(f"Invalid token data structure for health summary: {sso_value}")
+                    continue
 
-                for model, model_data in models_data.items():
+                isExpired = token_data.get("isExpired", False)
+                isValid = token_data.get("isValid", True)
+                isLowQuota = False
+                hasFailures = False
+                totalTokenFailures = 0
 
-                    if model not in summary["by_model"]:
-                        summary["by_model"][model] = {
-                            "total": 0,
-                            "healthy": 0,
-                            "expired": 0,
-                            "rate_limited": 0,
-                            "with_failures": 0,
-                        }
+                # Check quota status
+                quota_data = token_data.get("quota", {})
+                if isinstance(quota_data, dict):
+                    remaining_tokens = quota_data.get("remainingTokens", 0)
+                    if remaining_tokens < 4:  # 少于4积分无法使用专家模式
+                        isLowQuota = True
 
-                    summary["by_model"][model]["total"] += 1
+                # Check model statistics for failures
+                model_stats = token_data.get("modelStats", {})
+                if isinstance(model_stats, dict):
+                    for model, stats in model_stats.items():
+                        if isinstance(stats, dict):
+                            failure_count = stats.get("failureCount", 0)
+                            if failure_count > 0:
+                                hasFailures = True
+                                totalTokenFailures += failure_count
 
-                    if model_data.get("is_expired", False):
-                        summary["by_model"][model]["expired"] += 1
-                        is_expired = True
-                    elif not model_data.get("isValid", True):
-                        summary["by_model"][model]["rate_limited"] += 1
-                        is_rate_limited = True
-                    else:
-                        summary["by_model"][model]["healthy"] += 1
+                            # Add to byModel summary
+                            if model not in summary["byModel"]:
+                                summary["byModel"][model] = {
+                                    "total": 0,
+                                    "healthy": 0,
+                                    "expired": 0,
+                                    "rateLimited": 0,
+                                    "lowQuota": 0,
+                                    "withFailures": 0,
+                                }
 
-                    failure_count = model_data.get("failed_request_count", 0)
-                    if failure_count > 0:
-                        summary["by_model"][model]["with_failures"] += 1
-                        has_failures = True
-                        total_token_failures += failure_count
+                            summary["byModel"][model]["total"] += 1
+
+                            if isExpired:
+                                summary["byModel"][model]["expired"] += 1
+                            elif isLowQuota:
+                                summary["byModel"][model]["lowQuota"] += 1
+                            elif not isValid:
+                                summary["byModel"][model]["rateLimited"] += 1
+                            else:
+                                summary["byModel"][model]["healthy"] += 1
+
+                            if failure_count > 0:
+                                summary["byModel"][model]["withFailures"] += 1
 
                 token_health_status[sso_value] = {
-                    "is_expired": is_expired,
-                    "is_rate_limited": is_rate_limited,
-                    "has_failures": has_failures,
-                    "total_failures": total_token_failures,
+                    "isExpired": isExpired,
+                    "isRateLimited": not isValid and not isExpired,
+                    "isLowQuota": isLowQuota,
+                    "hasFailures": hasFailures,
+                    "totalFailures": totalTokenFailures,
                 }
 
             summary["total_tokens"] = len(unique_tokens)
@@ -2266,18 +2433,219 @@ class ThreadSafeTokenManager:
             for sso_value in unique_tokens:
                 status = token_health_status[sso_value]
 
-                if status["is_expired"]:
-                    summary["expired_tokens"] += 1
-                elif status["is_rate_limited"]:
-                    summary["rate_limited_tokens"] += 1
+                if status["isExpired"]:
+                    summary["expiredTokens"] += 1
+                elif status["isLowQuota"]:
+                    summary["lowQuotaTokens"] += 1
+                elif status["isRateLimited"]:
+                    summary["rateLimitedTokens"] += 1
                 else:
-                    summary["healthy_tokens"] += 1
+                    summary["healthyTokens"] += 1
 
-                if status["has_failures"]:
-                    summary["tokens_with_failures"] += 1
-                    summary["total_failures"] += status["total_failures"]
+                if status["hasFailures"]:
+                    summary["tokensWithFailures"] += 1
+                    summary["totalFailures"] += status["totalFailures"]
 
             return summary
+
+    # --- New quota-based accounting (points system) ---
+    def _ensure_token_bucket(self, sso_value: str) -> None:
+        """Ensure token key exists in status map."""
+        if sso_value not in self._token_status:
+            self._token_status[sso_value] = {}
+
+    def update_token_quota(
+        self,
+        token_string: str,
+        remaining_tokens: int,
+        total_tokens: int,
+        window_size_seconds: Optional[int] = None,
+    ) -> None:
+        """Update per-token shared quota and derived category counts.
+
+        - remaining_tokens: authoritative remaining points from upstream
+        - total_tokens: total points capacity (default 80 if unknown)
+        - window_size_seconds: upstream window (optional)
+
+        Updates quota fields:
+        - quota.remainingTokens: 剩余积分
+        - quota.totalTokens: 总积分
+        - counts: 各模式可用次数的快捷访问
+        """
+        try:
+            with self._lock:
+                credential = TokenCredential(token_string, TokenType.NORMAL)
+                sso_value = credential.extract_sso_value()
+                self._ensure_token_bucket(sso_value)
+
+                if sso_value not in self._token_status:
+                    return False
+
+                models_data = self._token_status[sso_value]
+                quota = models_data.get("quota", {})
+                cur_total = int(quota.get("totalTokens", 80) or 80)
+                new_total = int(total_tokens) if total_tokens is not None else cur_total
+                new_remaining = (
+                    int(remaining_tokens)
+                    if remaining_tokens is not None
+                    else new_total
+                )
+                new_remaining = max(0, new_remaining)
+
+                # 计算各模式可用次数
+                fast_counts = int(math.floor(new_remaining / 1))
+                expert_counts = int(math.floor(new_remaining / 4))
+                imagegen_counts = int(math.floor(new_remaining / 4))
+
+                models_data["quota"] = {
+                    "windowSizeSeconds": quota.get("windowSizeSeconds"),
+                    "totalTokens": new_total,
+                    "remainingTokens": new_remaining,
+                    "updatedAt": int(time.time() * 1000),
+                }
+
+                models_data["counts"] = {
+                    "fast": fast_counts,
+                    "expert": expert_counts,
+                    "imageGen": imagegen_counts,
+                }
+
+                self._save_token_status()
+                return True
+
+        except Exception as e:
+            print(f"Failed to update token quota: {e}")
+            return False
+
+    def record_model_usage(
+        self,
+        token_string: str,
+        model_name: str,
+        success: bool = True,
+        error_response: Optional[str] = None
+    ) -> None:
+        """Record model usage statistics with camelCase naming.
+
+        Records:
+        - lastCallTime: 最后一次调用时间
+        - requestCount: 请求次数
+        - failureCount: 失败次数
+        - lastFailureTime: 最后一次失败时间
+        - lastFailureResponse: 最后一次失败响应
+        """
+        try:
+            with self._lock:
+                credential = TokenCredential(token_string, TokenType.NORMAL)
+                sso_value = credential.extract_sso_value()
+                self._ensure_token_bucket(sso_value)
+
+                # 确保 modelStats 存在
+                if "modelStats" not in self._token_status[sso_value]:
+                    self._token_status[sso_value]["modelStats"] = {}
+                    for model_type in ModelType:
+                        self._token_status[sso_value]["modelStats"][model_type.value] = {
+                            "lastCallTime": None,
+                            "requestCount": 0,
+                            "failureCount": 0,
+                            "lastFailureTime": None,
+                            "lastFailureResponse": None
+                        }
+
+                model_stats = self._token_status[sso_value]["modelStats"]
+                if model_name not in model_stats:
+                    model_stats[model_name] = {
+                        "lastCallTime": None,
+                        "requestCount": 0,
+                        "failureCount": 0,
+                        "lastFailureTime": None,
+                        "lastFailureResponse": None
+                    }
+
+                # 更新统计数据
+                current_time = int(time.time() * 1000)
+                model_stats[model_name]["lastCallTime"] = current_time
+                model_stats[model_name]["requestCount"] += 1
+
+                if not success:
+                    model_stats[model_name]["failureCount"] += 1
+                    model_stats[model_name]["lastFailureTime"] = current_time
+                    if error_response:
+                        model_stats[model_name]["lastFailureResponse"] = error_response
+
+                self._save_token_status()
+
+        except Exception as e:
+            print(f"Failed to record model usage: {e}")
+
+    def update_token_quota(
+        self,
+        token_string: str,
+        remaining_tokens: int,
+        total_tokens: int,
+        window_size_seconds: Optional[int] = None,
+    ) -> None:
+        """Update per-token shared quota and derived category counts.
+
+        Data structure using camelCase (no underscores):
+        - quota: main quota information
+        - counts: derived usage counts
+        - modelStats: individual model usage statistics
+        """
+        try:
+            with self._lock:
+                credential = TokenCredential(token_string, TokenType.NORMAL)
+                sso_value = credential.extract_sso_value()
+                self._ensure_token_bucket(sso_value)
+
+                # Costs: expert/imageGen=4, others=1
+                remaining = max(0, int(remaining_tokens))
+                total = max(0, int(total_tokens))
+
+                # 计算各模式可用次数 - 直接固定值，不计算
+                fast_counts = 80 if remaining >= 80 else remaining
+                expert_counts = 20 if remaining >= 80 else max(0, int(remaining // 4))
+                imagegen_counts = 20 if remaining >= 80 else max(0, int(remaining // 4))
+
+                self._token_status[sso_value]["quota"] = {
+                    "windowSizeSeconds": int(window_size_seconds)
+                    if window_size_seconds is not None
+                    else None,
+                    "totalTokens": total,
+                    "remainingTokens": remaining,
+                    "updatedAt": int(time.time() * 1000),
+                }
+
+                self._token_status[sso_value]["counts"] = {
+                    "fast": fast_counts,
+                    "expert": expert_counts,
+                    "imageGen": imagegen_counts,
+                }
+
+                # 初始化 modelStats（如果不存在）
+                if "modelStats" not in self._token_status[sso_value]:
+                    self._token_status[sso_value]["modelStats"] = {}
+                    # 为每个ModelType初始化统计
+                    for model_type in ModelType:
+                        self._token_status[sso_value]["modelStats"][model_type.value] = {
+                            "lastCallTime": None,
+                            "requestCount": 0,
+                            "failureCount": 0,
+                            "lastFailureTime": None,
+                            "lastFailureResponse": None
+                        }
+
+                # 更新token有效状态：积分少于4则无法使用专家模式和绘图模式
+                for model, model_data in self._token_status[sso_value].items():
+                    if isinstance(model_data, dict) and model not in ["quota", "counts", "modelStats"]:
+                        # 新的isValid逻辑：除了原来的429限制外，还要检查积分
+                        current_isExpired = model_data.get("isExpired", False)
+                        if not current_isExpired:  # 只有未过期的token才检查积分
+                            if remaining < 4:
+                                model_data["isValid"] = False
+
+                self._save_token_status()
+        except Exception as e:
+            print(f"Failed to update token quota: {e}")
 
 
 @dataclass
@@ -4035,6 +4403,61 @@ def create_app(config: ConfigurationManager) -> Flask:
             error_data, status_code
         )
 
+    # Background updater: after each model request, query upstream rate-limits and
+    # persist the authoritative remainingTokens into token_status.json.
+    def _update_rate_limits_async(
+        cookie: Optional[str], used_token: Optional[str], model_name: str, proxy_url: Optional[str]
+    ) -> None:
+        if not used_token or not cookie:
+            return
+
+        def worker():
+            try:
+                # Prefer the same proxy used for the request; fall back to configured static/dynamic
+                proxy = proxy_url or config.get("API.PROXY")
+                if not proxy and config.get("API.DYNAMIC_PROXY_API"):
+                    try:
+                        pm = get_proxy_manager(config)
+                        proxy = pm.get_working_proxy()
+                    except Exception:
+                        proxy = None
+                proxy_config = UtilityFunctions.get_proxy_configuration(proxy)
+                print(f"rate-limits model: {model_name}")
+                payload = {"requestKind": "DEFAULT", "modelName": model_name}
+                resp = curl_requests.post(
+                    f"{config.get('API.BASE_URL')}/rest/rate-limits",
+                    headers={
+                        **get_dynamic_headers("POST", "/rest/rate-limits", config),
+                        "Cookie": cookie,
+                    },
+                    json=payload,
+                    impersonate="chrome133a",
+                    timeout=30,
+                    **proxy_config,
+                )
+
+                if resp.status_code != 200:
+                    print(
+                        f"Rate-limits query failed: HTTP {resp.status_code}",
+                        "RateLimits",
+                    )
+                    return
+
+                data = resp.json() if hasattr(resp, "json") else None
+                if not isinstance(data, dict):
+                    print("Rate-limits response not JSON dict", "RateLimits")
+                    return
+
+                remaining = int(data.get("remainingTokens", 0))
+                total = int(data.get("totalTokens", 80))
+                window = data.get("windowSizeSeconds")
+
+                token_manager.update_token_quota(used_token, remaining, total, window)
+            except Exception as e:
+                print(f"Failed to update rate-limits: {e}", "RateLimits")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     @app.errorhandler(ValidationException)
     def handle_validation_error(e: ValidationException) -> Tuple[Dict[str, Any], int]:
         """Handle validation exceptions."""
@@ -4096,6 +4519,9 @@ def create_app(config: ConfigurationManager) -> Flask:
 
             payload = grok_client.prepare_chat_request(data)
 
+            # Get normalized model name for rate-limits API calls
+            normalized_model = grok_client.validate_model_and_request(model, data)
+
             response = None
             used_token = None
             retry_count = 0
@@ -4111,6 +4537,7 @@ def create_app(config: ConfigurationManager) -> Flask:
                     if response.status_code == 200:
                         break
                     elif response.status_code == 429:
+                        print("Rate limited (429)")
                         # If using dynamic proxy (i.e. no static PROXY configured), rotate proxy
                         try:
                             if not config.get("API.PROXY") and config.get("API.DYNAMIC_PROXY_API") and used_proxy_url:
@@ -4125,6 +4552,11 @@ def create_app(config: ConfigurationManager) -> Flask:
                         if token_manager.get_token_count_for_model(model) > 1:
                             try:
                                 token_manager.rotate_token(model, used_token)
+                                # 触发状态更新以同步最新的限流信息
+                                if used_token:
+                                    cookie = f"{used_token};{config.get('SERVER.CF_CLEARANCE', '')}"
+                                    _update_rate_limits_async(cookie, used_token, normalized_model, used_proxy_url)
+                                    print("Triggered rate-limits update for 429 token")
                             except Exception:
                                 pass
                             print("Rate limited (429), rotating token and retrying")
@@ -4209,6 +4641,9 @@ def create_app(config: ConfigurationManager) -> Flask:
                         print(f"Stream processing error: {e}")
                         error_response = MessageProcessor.create_error_response(str(e))
                         yield f"data: {json.dumps(error_response)}\n\n"
+                    finally:
+                        # 流式请求处理完成后更新额度状态
+                        _update_rate_limits_async(cookie, used_token, normalized_model, used_proxy_url)
 
                 return Response(
                     stream_with_context(generate()),
@@ -4229,6 +4664,9 @@ def create_app(config: ConfigurationManager) -> Flask:
                     formatted_response = MessageProcessor.create_chat_completion(
                         response_result, model
                     )
+                # 非流式请求处理完成后更新额度状态
+                _update_rate_limits_async(cookie, used_token, normalized_model, used_proxy_url)
+                print("Updated rate-limits after non-stream completion")
                 return jsonify(formatted_response)
 
         except (
@@ -4384,6 +4822,11 @@ def create_app(config: ConfigurationManager) -> Flask:
             return jsonify({"error": "Unauthorized"}), 401
 
         try:
+            # Ensure default quota/counts present for backward compatibility
+            try:
+                token_manager._ensure_quota_defaults_for_all()
+            except Exception:
+                pass
             status_map = token_manager.get_token_status_map()
             health_summary = token_manager.get_token_health_summary()
 
@@ -4392,6 +4835,51 @@ def create_app(config: ConfigurationManager) -> Flask:
             )
         except Exception as e:
             print(f"Error getting manager tokens: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/manager/api/model_stats")
+    def get_model_stats():
+        """Get aggregated model usage statistics."""
+        if not check_session_auth():
+            return jsonify({"error": "Unauthorized"}), 401
+
+        try:
+            status_map = token_manager.get_token_status_map()
+            models_summary = {}
+
+            # 汇总所有token的模型统计数据
+            for token_data in status_map.values():
+                model_stats = token_data.get("modelStats", {})
+                for model_name, stats in model_stats.items():
+                    if model_name not in models_summary:
+                        models_summary[model_name] = {
+                            "totalRequests": 0,
+                            "totalFailures": 0,
+                            "lastCallTime": None,
+                            "lastFailureTime": None,
+                            "tokenCount": 0  # 使用该模型的token数量
+                        }
+
+                    models_summary[model_name]["totalRequests"] += stats.get("requestCount", 0)
+                    models_summary[model_name]["totalFailures"] += stats.get("failureCount", 0)
+
+                    # 记录最新的调用时间
+                    if stats.get("lastCallTime"):
+                        if not models_summary[model_name]["lastCallTime"] or stats["lastCallTime"] > models_summary[model_name]["lastCallTime"]:
+                            models_summary[model_name]["lastCallTime"] = stats["lastCallTime"]
+
+                    # 记录最新的失败时间
+                    if stats.get("lastFailureTime"):
+                        if not models_summary[model_name]["lastFailureTime"] or stats["lastFailureTime"] > models_summary[model_name]["lastFailureTime"]:
+                            models_summary[model_name]["lastFailureTime"] = stats["lastFailureTime"]
+
+                    # 统计使用该模型的token数量
+                    if stats.get("requestCount", 0) > 0:
+                        models_summary[model_name]["tokenCount"] += 1
+
+            return jsonify({"models_summary": models_summary})
+        except Exception as e:
+            print(f"Error getting model stats: {e}")
             return jsonify({"error": str(e)}), 500
 
     @app.route("/manager/api/add", methods=["POST"])
@@ -4451,6 +4939,57 @@ def create_app(config: ConfigurationManager) -> Flask:
             print(f"Error deleting manager token: {e}")
             return jsonify({"error": str(e)}), 500
 
+
+    @app.route("/manager/api/reset_quota", methods=["POST"])
+    def reset_quota_manager():
+        """Reset quota for a token or all tokens (manager)."""
+        if not check_session_auth():
+            return jsonify({"error": "Unauthorized"}), 401
+
+        try:
+            data = request.get_json() or {}
+            if not isinstance(data, dict):
+                data = {}
+
+            remaining = data.get("remainingTokens")
+            total = data.get("totalTokens")
+            if remaining is not None:
+                try:
+                    remaining = int(remaining)
+                except Exception:
+                    remaining = None
+            if total is not None:
+                try:
+                    total = int(total)
+                except Exception:
+                    total = None
+
+            if data.get("all"):
+                updated = token_manager.reset_all_quotas(remaining=remaining, total=total)
+                return jsonify({"success": True, "updated": updated})
+
+            sso = data.get("sso")
+            if not sso:
+                return jsonify({"error": "Missing 'sso' or 'all'"}), 400
+
+            # Accept either raw sso value or full token string containing sso=
+            sso_value = sso
+            if isinstance(sso, str) and "sso=" in sso:
+                try:
+                    cred = TokenCredential(sso, TokenType.NORMAL)
+                    sso_value = cred.extract_sso_value()
+                except Exception:
+                    sso_value = sso
+
+            ok = token_manager.reset_token_quota(sso_value, remaining=remaining, total=total)
+            if ok:
+                return jsonify({"success": True})
+            else:
+                return jsonify({"error": "Token not found"}), 404
+
+        except Exception as e:
+            print(f"Error resetting quota: {e}")
+            return jsonify({"error": str(e)}), 500
     @app.route("/manager/api/cf_clearance", methods=["POST"])
     def set_cf_clearance():
         """Set CF clearance via manager API."""

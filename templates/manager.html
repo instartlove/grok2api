@@ -129,32 +129,356 @@
             color: var(--danger-color);
         }
 
+        /* 模型统计总览样式 */
+        .models-stats-summary {
+            margin: 20px 0;
+            padding: 20px;
+            background: var(--card-bg);
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+
+        .models-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .model-stats-card {
+            background: linear-gradient(135deg, #f8f9fa 0%, #f1f3f4 100%);
+            border: 1px solid #e9ecef;
+            border-radius: 10px;
+            padding: 15px;
+            transition: all 0.3s ease;
+        }
+
+        .model-stats-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        }
+
+        .model-stats-card h4 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 12px;
+            text-align: center;
+            border-bottom: 1px solid #e9ecef;
+            padding-bottom: 8px;
+        }
+
+        .model-stats-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .model-stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 8px;
+            background: white;
+            border-radius: 6px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .model-stat-item .stat-value {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 2px;
+        }
+
+        .model-stat-item .stat-label {
+            font-size: 10px;
+            color: var(--text-secondary);
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .model-stat-item.requests .stat-value {
+            color: var(--primary-color);
+        }
+
+        .model-stat-item.failures .stat-value {
+            color: var(--danger-color);
+        }
+
+        .model-stat-item.last-call .stat-value {
+            color: var(--warning-color);
+            font-size: 12px;
+        }
+
+        .model-stat-item.last-failure .stat-value {
+            color: var(--expired-color);
+            font-size: 12px;
+        }
+
+        /* Token卡片中的模型统计样式 - 简化版 */
+
+        /* 弹窗样式 */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .modal-overlay.show {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+            transform: scale(0.8);
+            transition: transform 0.3s ease;
+        }
+
+        .modal-overlay.show .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin: 0;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: var(--text-secondary);
+            padding: 4px;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .modal-close:hover {
+            background: #f0f0f0;
+            color: var(--text-primary);
+        }
+
+        .modal-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+        }
+
+        .modal-model-card {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 15px;
+        }
+
+        .modal-model-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 10px;
+            text-align: center;
+            border-bottom: 1px solid #dee2e6;
+            padding-bottom: 8px;
+        }
+
+        .modal-model-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .modal-info-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 8px;
+            background: white;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .modal-info-label {
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .modal-info-value {
+            font-weight: 600;
+        }
+
+        .modal-info-value.requests {
+            color: var(--primary-color);
+        }
+
+        .modal-info-value.failures {
+            color: var(--danger-color);
+        }
+
+        .modal-last-call {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-align: center;
+            margin-top: 8px;
+            padding: 4px;
+            background: white;
+            border-radius: 4px;
+        }
+
+        /* Token卡片中的查看统计按钮 */
+        .view-stats-btn {
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            margin-top: 10px;
+            width: 100%;
+            transition: background-color 0.2s;
+        }
+
+        .view-stats-btn:hover {
+            background: #2980b9;
+        }
+
+        .token-model-stats h5 {
+            font-size: 13px;
+            color: var(--text-primary);
+            margin-bottom: 10px;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .token-model-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 8px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .token-model-stat {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 11px;
+        }
+
+        .token-model-stat-name {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+            text-align: center;
+            font-size: 10px;
+            border-bottom: 1px solid #e9ecef;
+            padding-bottom: 2px;
+        }
+
+        .token-model-stat-info {
+            display: flex;
+            justify-content: space-between;
+            margin: 2px 0;
+        }
+
+        .token-model-stat-info .label {
+            color: var(--text-secondary);
+        }
+
+        .token-model-stat-info .value {
+            font-weight: 600;
+        }
+
+        .token-model-stat-info.requests .value {
+            color: var(--primary-color);
+        }
+
+        .token-model-stat-info.failures .value {
+            color: var(--danger-color);
+        }
+
         .model-remaining-stats {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 15px;
+            grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+            gap: 12px;
+            margin-bottom: 15px;
         }
 
         .model-stat {
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding: 10px;
-            background-color: #f8f9fa;
+            padding: 12px 8px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #f1f3f4 100%);
             border-radius: 8px;
+            border: 1px solid #e9ecef;
+            transition: all 0.3s ease;
+        }
+
+        .model-stat:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         }
 
         .model-stat .stat-label {
-            font-size: 12px;
+            font-size: 11px;
             color: var(--text-secondary);
-            margin-bottom: 5px;
+            margin-bottom: 6px;
             text-align: center;
+            font-weight: 500;
         }
 
         .model-stat .stat-value {
-            font-size: 18px;
-            font-weight: 600;
+            font-size: 16px;
+            font-weight: 700;
             color: var(--primary-color);
+            text-align: center;
+        }
+
+        /* 额度不足警告样式 */
+        .quota-warning .stat-value {
+            color: var(--danger-color);
+            animation: pulse 2s infinite;
+        }
+
+        .quota-low .stat-value {
+            color: var(--warning-color);
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.6; }
+            100% { opacity: 1; }
         }
 
         .refresh-icon {
@@ -438,7 +762,9 @@
         <div class="overview-panel">
             <div class="header-actions">
                 <h2>Grok API 管理面板</h2>
-                <div class="refresh-icon" id="refreshTokens">
+                <div style="display:flex; gap:10px; align-items:center;">
+                  <button id="resetAllQuotasBtn" style="padding:8px 12px; border:1px solid var(--border-color); background:#fff; border-radius:8px; cursor:pointer;">重置全部额度</button>
+                  <div class="refresh-icon" id="refreshTokens">
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
                         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
@@ -446,16 +772,15 @@
                         <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
                         <path d="M3 21v-5h5" />
                     </svg>
+                  </div>
                 </div>
             </div>
 
             <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; font-size: 14px;">
                 <strong>说明:</strong><br>
-                <strong>以下用量为猜测值，不会被用作真正的限制，如果有谁知道真正的值是多少可以告诉我</strong><br>
-                • <strong>grok-3</strong>: 基础模型 (每12小时5次)<br>
-                • <strong>grok-4</strong>: 专家模型 (每12小时5次)<br>
-                • <strong>grok-4-deepsearch</strong>: 深度搜索 (每12小时2次, 独立限额池)<br>
-                • grok-fast, grok-expert, grok-search, grok-image 等现在均是 grok-3 或者 grok-4 的不同参数，不推荐直接使用 grok-3 或者 grok-4
+                • 采用积分额度：每个 Token 初始 <strong>80 积分</strong>；<code>-expert</code>/<code>-imageGen</code> 每次消耗 4 积分，其他模型每次 1 积分；额度每天美国时间凌晨刷新。<br>
+                • 每次请求后自动从官方接口同步剩余额度（Rate Limits），以 <strong>remainingTokens</strong> 为准计算各模式可用次数（向下取整）。<br>
+                • 面板顶部与每个 Token 卡片展示：快速模式（非 -expert/-imageGen）、专家模式（-expert）、绘图（-imageGen）。
             </div>
 
             <div class="overview-stats">
@@ -478,9 +803,13 @@
                     <div class="value" id="rateLimitedTokens">0</div>
                     <div class="label">限流中</div>
                 </div>
-                <div class="health-stat failures">
-                    <div class="value" id="tokensWithFailures">0</div>
-                    <div class="label">有失败</div>
+                <div class="health-stat failures" style="color: var(--warning-color);">
+                    <div class="value" id="lowQuotaTokens">0</div>
+                    <div class="label">额度不足</div>
+                </div>
+                <div class="health-stat" style="color: var(--primary-color);">
+                    <div class="value" id="totalRequests">0</div>
+                    <div class="label">总调用</div>
                 </div>
                 <div class="health-stat failures">
                     <div class="value" id="totalFailures">0</div>
@@ -488,18 +817,26 @@
                 </div>
             </div>
 
+            <!-- 模型使用统计总览 -->
+            <div class="models-stats-summary">
+                <h3 style="margin-bottom: 15px; font-size: 16px; color: var(--text-primary);">模型使用统计</h3>
+                <div class="models-stats-grid" id="modelsStatsGrid">
+                    <!-- 动态填充模型统计 -->
+                </div>
+            </div>
+
             <div class="model-remaining-stats">
                 <div class="model-stat">
-                    <div class="stat-label">grok-3 可用次数</div>
-                    <div class="stat-value" id="grok-3-count">0</div>
+                    <div class="stat-label">快速模式 可用次数</div>
+                    <div class="stat-value" id="fast-count">0</div>
                 </div>
                 <div class="model-stat">
-                    <div class="stat-label">grok-4 可用次数</div>
-                    <div class="stat-value" id="grok-4-count">0</div>
+                    <div class="stat-label">专家模式 可用次数</div>
+                    <div class="stat-value" id="expert-count">0</div>
                 </div>
                 <div class="model-stat">
-                    <div class="stat-label">grok-4-deepsearch 可用次数</div>
-                    <div class="stat-value" id="grok-4-deepsearch-count">0</div>
+                    <div class="stat-label">绘图 可用次数</div>
+                    <div class="stat-value" id="imageGen-count">0</div>
                 </div>
             </div>
         </div>
@@ -527,16 +864,115 @@
 
     <div id="notification"></div>
 
+    <!-- 模型统计弹窗 -->
+    <div id="statsModal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">模型使用统计</h3>
+                <button class="modal-close" onclick="closeStatsModal()">&times;</button>
+            </div>
+            <div id="modalStatsContent" class="modal-stats-grid">
+                <!-- 动态填充内容 -->
+            </div>
+        </div>
+    </div>
+
     <script>
 
         const modelConfig = {
-            "grok-3": { RequestFrequency: 5, ExpirationTime: 12 * 60 * 60 * 1000 },      // 5 requests per 12 hours (free tier)
-            "grok-4": { RequestFrequency: 5, ExpirationTime: 12 * 60 * 60 * 1000 },      // 5 requests per 12 hours (free tier)
-            "grok-4-deepsearch": { RequestFrequency: 2, ExpirationTime: 12 * 60 * 60 * 1000 } // 2 deepsearch per 12 hours (free tier)
+            // Legacy per-model visualization kept for reference in token cards; counts no longer authoritative
+            "grok-3": { RequestFrequency: 5, ExpirationTime: 12 * 60 * 60 * 1000 },
+            "grok-4": { RequestFrequency: 5, ExpirationTime: 12 * 60 * 60 * 1000 },
+            "grok-4-deepsearch": { RequestFrequency: 2, ExpirationTime: 12 * 60 * 60 * 1000 }
         };
 
         let tokenMap = {};
         let healthSummary = {};
+
+        // 弹窗功能
+        function openStatsModal(tokenData, tokenKey) {
+            const modal = document.getElementById('statsModal');
+            const modalContent = document.getElementById('modalStatsContent');
+            const modalTitle = document.querySelector('.modal-title');
+
+            modalTitle.textContent = `模型使用统计 - ${tokenKey.substring(0, 20)}...`;
+            modalContent.innerHTML = '';
+
+            const modelStats = tokenData.modelStats;
+            if (modelStats && typeof modelStats === 'object' && Object.keys(modelStats).length > 0) {
+                Object.entries(modelStats).forEach(([modelName, stats]) => {
+                    if (stats && typeof stats === 'object' && (stats.requestCount > 0 || stats.failureCount > 0)) {
+                        const modelCard = document.createElement('div');
+                        modelCard.className = 'modal-model-card';
+
+                        const lastCallTime = stats.lastCallTime ?
+                            new Date(stats.lastCallTime).toLocaleString('zh-CN', {
+                                year: 'numeric',
+                                month: '2-digit',
+                                day: '2-digit',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                second: '2-digit'
+                            }) : '暂无记录';
+
+                        const lastFailureTime = stats.lastFailureTime ?
+                            new Date(stats.lastFailureTime).toLocaleString('zh-CN', {
+                                year: 'numeric',
+                                month: '2-digit',
+                                day: '2-digit',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                second: '2-digit'
+                            }) : '暂无失败';
+
+                        modelCard.innerHTML = `
+                            <div class="modal-model-name">${modelName}</div>
+                            <div class="modal-model-info">
+                                <div class="modal-info-item">
+                                    <span class="modal-info-label">总调用数:</span>
+                                    <span class="modal-info-value requests">${stats.requestCount || 0}</span>
+                                </div>
+                                <div class="modal-info-item">
+                                    <span class="modal-info-label">失败次数:</span>
+                                    <span class="modal-info-value failures">${stats.failureCount || 0}</span>
+                                </div>
+                            </div>
+                            <div class="modal-last-call">
+                                <div>最后调用: ${lastCallTime}</div>
+                                ${stats.failureCount > 0 ? `<div style="margin-top: 4px;">最后失败: ${lastFailureTime}</div>` : ''}
+                                ${stats.lastFailureResponse ? `<div style="margin-top: 4px; color: var(--danger-color); font-size: 10px;">失败原因: ${stats.lastFailureResponse}</div>` : ''}
+                            </div>
+                        `;
+                        modalContent.appendChild(modelCard);
+                    }
+                });
+            }
+
+            if (modalContent.children.length === 0) {
+                modalContent.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 40px;">暂无模型使用记录</p>';
+            }
+
+            modal.classList.add('show');
+        }
+
+        function closeStatsModal() {
+            const modal = document.getElementById('statsModal');
+            modal.classList.remove('show');
+        }
+
+        // 点击弹窗背景关闭
+        document.getElementById('statsModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeStatsModal();
+            }
+        });
+
+        // ESC键关闭弹窗
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeStatsModal();
+            }
+        });
 
 
         function getProgressColor(percentage) {
@@ -546,83 +982,177 @@
             return 'var(--success-color)';
         }
 
-        function calculateModelRemaining() {
-            const modelRemaining = {};
-            Object.keys(modelConfig).forEach(modelName => {
-                const maxRequests = modelConfig[modelName].RequestFrequency;
-                modelRemaining[modelName] = 0;
+        function calculateCategoryRemaining() {
+            const totals = { fast: 0, expert: 0, imageGen: 0 };
+            Object.values(tokenMap).forEach(tokenData => {
+                const quota = tokenData.quota;
+                let counts = tokenData.counts;
 
-                Object.values(tokenMap).forEach(tokenData => {
-                    const modelData = tokenData[modelName];
-                    if (modelData && modelData.isValid && !modelData.is_expired) {
-                        const usedRequests = modelData.request_count || modelData.totalRequestCount || 0;
-                        // 允许负数，表示超出限额的情况
-                        const remaining = maxRequests - usedRequests;
-                        modelRemaining[modelName] += remaining;
-                    }
-                });
+                // 优先使用新的字段
+                if (quota && quota.fastCounts !== undefined) {
+                    counts = {
+                        fast: parseInt(quota.fastCounts || 0, 10),
+                        expert: parseInt(quota.expertCounts || 0, 10),
+                        imageGen: parseInt(quota.imageGenCounts || 0, 10)
+                    };
+                } else if (!counts && quota && typeof quota.remainingTokens === 'number') {
+                    // 向后兼容性计算
+                    const r = Math.max(0, Math.floor(quota.remainingTokens));
+                    counts = { fast: r, expert: Math.floor(r/4), imageGen: Math.floor(r/4) };
+                }
+
+                if (counts) {
+                    totals.fast += parseInt(counts.fast || 0, 10);
+                    totals.expert += parseInt(counts.expert || 0, 10);
+                    totals.imageGen += parseInt(counts.imageGen || 0, 10);
+                }
             });
-            return modelRemaining;
+            return totals;
         }
 
         function updateTokenCounters() {
             document.getElementById('totalTokens').textContent = Object.keys(tokenMap).length;
 
             if (healthSummary) {
-                document.getElementById('healthyTokens').textContent = healthSummary.healthy_tokens || 0;
-                document.getElementById('expiredTokens').textContent = healthSummary.expired_tokens || 0;
-                document.getElementById('rateLimitedTokens').textContent = healthSummary.rate_limited_tokens || 0;
-                document.getElementById('tokensWithFailures').textContent = healthSummary.tokens_with_failures || 0;
-                document.getElementById('totalFailures').textContent = healthSummary.total_failures || 0;
+                document.getElementById('healthyTokens').textContent = healthSummary.healthyTokens || 0;
+                document.getElementById('expiredTokens').textContent = healthSummary.expiredTokens || 0;
+                document.getElementById('rateLimitedTokens').textContent = healthSummary.rateLimitedTokens || 0;
+                document.getElementById('lowQuotaTokens').textContent = healthSummary.lowQuotaTokens || 0;
+                document.getElementById('totalFailures').textContent = healthSummary.totalFailures || 0;
             }
 
-            const modelRemaining = calculateModelRemaining();
-
-            const modelIds = ['grok-3', 'grok-4', 'grok-4-deepsearch'];
-            modelIds.forEach(modelName => {
-                const countElement = document.getElementById(`${modelName}-count`);
-                if (countElement) {
-                    const remaining = modelRemaining[modelName] || 0;
-                    if (remaining < 0) {
-                        // 超限情况：显示负数并加上特殊样式
-                        countElement.textContent = remaining;
-                        countElement.style.color = '#8e24aa';
-                        countElement.style.fontWeight = 'bold';
-                        countElement.title = `已超出限额 ${Math.abs(remaining)} 次`;
-                    } else {
-                        // 正常情况
-                        countElement.textContent = remaining;
-                        countElement.style.color = 'var(--primary-color)';
-                        countElement.style.fontWeight = '600';
-                        countElement.title = `剩余可用 ${remaining} 次`;
-                    }
+            // 计算总调用数
+            let totalRequests = 0;
+            Object.values(tokenMap).forEach(tokenData => {
+                const modelStats = tokenData.modelStats;
+                if (modelStats && typeof modelStats === 'object') {
+                    Object.values(modelStats).forEach(stats => {
+                        if (stats && typeof stats === 'object') {
+                            totalRequests += stats.requestCount || 0;
+                        }
+                    });
                 }
             });
+            document.getElementById('totalRequests').textContent = totalRequests;
+
+            const cat = calculateCategoryRemaining();
+            [
+                ['fast', '快速模式'],
+                ['expert', '专家模式'],
+                ['imageGen', '绘图']
+            ].forEach(([key, label]) => {
+                const el = document.getElementById(`${key}-count`);
+                if (el) {
+                    const remaining = cat[key] || 0;
+                    el.textContent = Math.max(0, Math.floor(remaining));
+                    el.style.color = 'var(--primary-color)';
+                    el.style.fontWeight = '600';
+                    el.title = `${label} 剩余可用 ${el.textContent} 次`;
+                }
+            });
+
+            // 更新模型统计总览
+            updateModelsStatsOverview(tokenMap);
+        }
+
+        // 更新模型统计总览函数
+        function updateModelsStatsOverview(tokenMap) {
+            const modelsStatsGrid = document.getElementById('modelsStatsGrid');
+            if (!modelsStatsGrid) return;
+
+            // 汇总所有token的模型统计数据
+            const modelsSummary = {};
+
+            Object.values(tokenMap).forEach(tokenData => {
+                const modelStats = tokenData.modelStats;
+                if (modelStats && typeof modelStats === 'object') {
+                    Object.entries(modelStats).forEach(([modelName, stats]) => {
+                        if (stats && typeof stats === 'object') {
+                            if (!modelsSummary[modelName]) {
+                                modelsSummary[modelName] = {
+                                    totalRequests: 0,
+                                    totalFailures: 0,
+                                    lastCallTimes: [],
+                                    lastFailureTimes: []
+                                };
+                            }
+
+                            modelsSummary[modelName].totalRequests += stats.requestCount || 0;
+                            modelsSummary[modelName].totalFailures += stats.failureCount || 0;
+
+                            if (stats.lastCallTime) {
+                                modelsSummary[modelName].lastCallTimes.push(stats.lastCallTime);
+                            }
+
+                            if (stats.lastFailureTime) {
+                                modelsSummary[modelName].lastFailureTimes.push(stats.lastFailureTime);
+                            }
+                        }
+                    });
+                }
+            });
+
+            // 清空现有内容
+            modelsStatsGrid.innerHTML = '';
+
+            // 生成模型统计卡片
+            Object.entries(modelsSummary).forEach(([modelName, summary]) => {
+                if (summary.totalRequests > 0 || summary.totalFailures > 0) {
+                    const modelStatsCard = document.createElement('div');
+                    modelStatsCard.className = 'model-stats-card';
+
+                    const lastCallTime = summary.lastCallTimes.length > 0 ?
+                        new Date(Math.max(...summary.lastCallTimes)).toLocaleString('zh-CN', {
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                        }) : '-';
+
+                    const lastFailureTime = summary.lastFailureTimes.length > 0 ?
+                        new Date(Math.max(...summary.lastFailureTimes)).toLocaleString('zh-CN', {
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                        }) : '-';
+
+                    modelStatsCard.innerHTML = `
+                        <h4>${modelName}</h4>
+                        <div class="model-stats-info">
+                            <div class="model-stat-item requests">
+                                <div class="stat-value">${summary.totalRequests}</div>
+                                <div class="stat-label">总请求数</div>
+                            </div>
+                            <div class="model-stat-item failures">
+                                <div class="stat-value">${summary.totalFailures}</div>
+                                <div class="stat-label">总失败数</div>
+                            </div>
+                            <div class="model-stat-item last-call">
+                                <div class="stat-value">${lastCallTime}</div>
+                                <div class="stat-label">最后调用</div>
+                            </div>
+                            <div class="model-stat-item last-failure">
+                                <div class="stat-value">${lastFailureTime}</div>
+                                <div class="stat-label">最后失败</div>
+                            </div>
+                        </div>
+                    `;
+
+                    modelsStatsGrid.appendChild(modelStatsCard);
+                }
+            });
+
+            // 如果没有统计数据，显示提示信息
+            if (modelsStatsGrid.children.length === 0) {
+                modelsStatsGrid.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 20px;">暂无模型使用记录</p>';
+            }
         }
 
 
         async function updateExpiredTokenTimers() {
-            const currentTime = Date.now();
-            const expiredBadges = document.querySelectorAll('.status-badge.status-rate-limited');
-            for (const badge of expiredBadges) {
-                const invalidatedTime = parseInt(badge.getAttribute('data-invalidated-time'), 10);
-                const expirationTime = parseInt(badge.getAttribute('data-expiration-time'), 10);
-                if (invalidatedTime && expirationTime) {
-                    const recoveryTime = invalidatedTime + expirationTime;
-                    const remainingTime = recoveryTime - currentTime;
-                    const tooltip = badge.querySelector('.tooltip');
-                    if (tooltip) {
-                        if (remainingTime > 0) {
-                            const minutes = Math.floor(remainingTime / 60000);
-                            const seconds = Math.floor((remainingTime % 60000) / 1000);
-                            tooltip.textContent = `${minutes}分${seconds}秒后恢复`;
-                        } else {
-                            tooltip.textContent = '已可恢复';
-                            await fetchTokenMap();
-                        }
-                    }
-                }
-            }
+            // 简化版本：quota-based系统不需要基于时间的恢复逻辑
+            // 只是定期刷新数据以获取最新状态
         }
 
         function getTokenHealthStatus(ssoValue, tokenData) {
@@ -630,17 +1160,41 @@
             let isRateLimited = false;
             let hasFailures = false;
             let totalFailures = 0;
+            let isLowQuota = false;
+
+            // 检查额度是否不足
+            const quota = tokenData.quota;
+            if (quota && quota.remainingTokens !== undefined) {
+                if (quota.remainingTokens < 4) {
+                    isLowQuota = true;
+                }
+            }
 
             Object.entries(tokenData).forEach(([model, modelData]) => {
-                if (modelData.is_expired) isExpired = true;
-                if (!modelData.isValid && !modelData.is_expired) isRateLimited = true;
-                if (modelData.failed_request_count > 0) {
-                    hasFailures = true;
-                    totalFailures += modelData.failed_request_count;
+                if (model.startsWith('__') || model === 'quota' || model === 'counts' || model === 'modelStats') return; // 跳过系统字段
+
+                // In the new structure, these fields don't exist in modelData anymore
+                // They are now at the top level of tokenData
+            });
+
+            // In the new quota-based system, status fields are at the token top level
+            isExpired = tokenData.isExpired || false;
+            isRateLimited = (!tokenData.isValid && !tokenData.isExpired) || false;
+
+            // Check model failures from modelStats
+            const modelStats = tokenData.modelStats || {};
+            Object.entries(modelStats).forEach(([model, modelStat]) => {
+                if (modelStat && typeof modelStat === 'object') {
+                    const failureCount = modelStat.failureCount || 0;
+                    if (failureCount > 0) {
+                        hasFailures = true;
+                        totalFailures += failureCount;
+                    }
                 }
             });
 
             if (isExpired) return { status: 'expired', text: '已过期', failures: totalFailures };
+            if (isLowQuota) return { status: 'rate-limited', text: '额度不足', failures: totalFailures };
             if (isRateLimited) return { status: 'rate-limited', text: '限流中', failures: totalFailures };
             if (hasFailures) return { status: 'healthy', text: '健康', failures: totalFailures };
             return { status: 'healthy', text: '健康', failures: 0 };
@@ -692,6 +1246,38 @@
                     }
                 });
                 tokenHeader.appendChild(tokenTitle);
+                // Reset quota button
+                const resetBtn = document.createElement('button');
+                resetBtn.className = 'delete-btn';
+                resetBtn.style.backgroundColor = 'var(--warning-color)';
+                resetBtn.style.marginRight = '8px';
+                resetBtn.textContent = '重置额度';
+                resetBtn.addEventListener('click', async () => {
+                    try {
+                        const input = prompt('输入重置后的剩余额度（留空表示重置为总额度）');
+                        const payload = { sso: token };
+                        if (input !== null && input.trim() !== '') {
+                            const val = parseInt(input.trim(), 10);
+                            if (!isNaN(val)) payload.remainingTokens = val;
+                        }
+                        const resp = await fetch('/manager/api/reset_quota', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+                        if (resp.ok) {
+                            await fetchTokenMap();
+                            showNotification('额度已重置');
+                        } else {
+                            showNotification('重置失败');
+                        }
+                    } catch (err) {
+                        showNotification('重置失败');
+                    }
+                });
+
+                tokenHeader.appendChild(tokenTitle);
+                tokenHeader.appendChild(resetBtn);
                 tokenHeader.appendChild(deleteBtn);
                 tokenCard.appendChild(tokenHeader);
 
@@ -706,6 +1292,94 @@
                   <div>失败次数: ${healthStatus.failures}</div>
               `;
                 tokenCard.appendChild(tokenHealthInfo);
+
+                // Quota summary per token (points-based)
+                const quota = tokenData.quota;
+                let counts = tokenData.counts;
+
+                // 优先使用新的字段
+                if (quota && quota.fastCounts !== undefined) {
+                    counts = {
+                        fast: parseInt(quota.fastCounts || 0, 10),
+                        expert: parseInt(quota.expertCounts || 0, 10),
+                        imageGen: parseInt(quota.imageGenCounts || 0, 10)
+                    };
+                } else if (!counts && quota && typeof quota.remainingTokens === 'number') {
+                    // 向后兼容性计算
+                    const r = Math.max(0, Math.floor(quota.remainingTokens));
+                    counts = { fast: r, expert: Math.floor(r/4), imageGen: Math.floor(r/4) };
+                }
+
+                if (quota || counts) {
+                    const quotaSection = document.createElement('div');
+                    quotaSection.className = 'model-remaining-stats';
+
+                    const qItem = document.createElement('div');
+                    qItem.className = 'model-stat';
+                    const remaining = (quota && quota.remainingTokens != null) ? Math.max(0, Math.floor(quota.remainingTokens)) : 0;
+                    const total = (quota && quota.totalTokens != null) ? Math.max(0, Math.floor(quota.totalTokens)) : 80;
+
+                    // 根据剩余额度添加样式
+                    if (remaining === 0) {
+                        qItem.classList.add('quota-warning');
+                    } else if (remaining < 10) {
+                        qItem.classList.add('quota-low');
+                    }
+
+                    qItem.innerHTML = `
+                        <div class="stat-label">剩余额度</div>
+                        <div class="stat-value">${remaining} / ${total}</div>
+                    `;
+                    quotaSection.appendChild(qItem);
+
+                    const fItem = document.createElement('div');
+                    fItem.className = 'model-stat';
+                    const fastCount = counts ? Math.max(0, Math.floor(counts.fast || 0)) : 0;
+                    fItem.innerHTML = `
+                        <div class="stat-label">快速模式</div>
+                        <div class="stat-value" title="消耗 1 积分/次">${fastCount}</div>
+                    `;
+                    quotaSection.appendChild(fItem);
+
+                    const eItem = document.createElement('div');
+                    eItem.className = 'model-stat';
+                    const expertCount = counts ? Math.max(0, Math.floor(counts.expert || 0)) : 0;
+                    eItem.innerHTML = `
+                        <div class="stat-label">专家模式</div>
+                        <div class="stat-value" title="消耗 4 积分/次">${expertCount}</div>
+                    `;
+                    quotaSection.appendChild(eItem);
+
+                    const iItem = document.createElement('div');
+                    iItem.className = 'model-stat';
+                    const imageGenCount = counts ? Math.max(0, Math.floor(counts.imageGen || 0)) : 0;
+                    iItem.innerHTML = `
+                        <div class="stat-label">绘图模式</div>
+                        <div class="stat-value" title="消耗 4 积分/次">${imageGenCount}</div>
+                    `;
+                    quotaSection.appendChild(iItem);
+
+                    tokenCard.appendChild(quotaSection);
+                }
+
+                // 添加查看模型统计按钮
+                const modelStats = tokenData.modelStats;
+                if (modelStats && typeof modelStats === 'object' && Object.keys(modelStats).length > 0) {
+                    // 检查是否有实际的统计数据
+                    const hasStats = Object.values(modelStats).some(stats =>
+                        stats && typeof stats === 'object' && (stats.requestCount > 0 || stats.failureCount > 0)
+                    );
+
+                    if (hasStats) {
+                        const viewStatsBtn = document.createElement('button');
+                        viewStatsBtn.className = 'view-stats-btn';
+                        viewStatsBtn.textContent = '查看模型统计';
+                        viewStatsBtn.addEventListener('click', () => {
+                            openStatsModal(tokenData, token);
+                        });
+                        tokenCard.appendChild(viewStatsBtn);
+                    }
+                }
 
                 Object.entries(modelConfig).forEach(([modelName, config]) => {
                     const modelData = tokenData[modelName];
@@ -755,20 +1429,25 @@
                     const statusBadge = document.createElement('div');
                     statusBadge.className = 'status-badge';
 
-                    if (modelData.is_expired) {
+                    if (tokenData.isExpired) {
                         statusBadge.classList.add('status-expired');
                         statusBadge.textContent = '已过期';
                         const tooltip = document.createElement('div');
                         tooltip.className = 'tooltip';
-                        tooltip.textContent = `失败次数: ${modelData.failed_request_count || 0}`;
+                        tooltip.textContent = `失败次数: ${getModelFailureCount(tokenData, modelName)}`;
+
+                        function getModelFailureCount(tokenData, modelName) {
+                            const modelStats = tokenData.modelStats || {};
+                            const modelStat = modelStats[modelName] || {};
+                            return modelStat.failureCount || 0;
+                        }
                         statusBadge.appendChild(tooltip);
-                    } else if (!modelData.isValid) {
+                    } else if (!tokenData.isValid) {
                         statusBadge.classList.add('status-rate-limited');
                         statusBadge.textContent = '限流';
-                        statusBadge.setAttribute('data-invalidated-time', modelData.invalidatedTime);
-                        statusBadge.setAttribute('data-expiration-time', config.ExpirationTime);
                         const tooltip = document.createElement('div');
                         tooltip.className = 'tooltip';
+                        tooltip.textContent = '当前token无效或受限';
                         statusBadge.appendChild(tooltip);
                     } else if (percentage > 100) {
                         // 新增：超限状态
@@ -789,13 +1468,17 @@
                     modelRow.appendChild(progressContainer);
                     modelRow.appendChild(statusBadge);
 
+                    // 添加失败信息（如果存在）
+                    const modelStats = tokenData.modelStats || {};
+                    const modelStat = modelStats[modelName] || {};
+                    const failureCount = modelStat.failureCount || 0;
 
-                    if (modelData.failed_request_count > 0) {
+                    if (failureCount > 0) {
                         const failureInfo = document.createElement('div');
                         failureInfo.className = 'failure-info';
-                        failureInfo.textContent = `失败 ${modelData.failed_request_count} 次`;
-                        if (modelData.last_failure_reason) {
-                            failureInfo.title = `最后失败: ${modelData.last_failure_reason}`;
+                        failureInfo.textContent = `失败 ${failureCount} 次`;
+                        if (modelStat.lastFailureResponse) {
+                            failureInfo.title = `最后失败: ${modelStat.lastFailureResponse}`;
                         }
                         modelRow.appendChild(failureInfo);
                     }
@@ -816,6 +1499,7 @@
                 healthSummary = data.health_summary || {};
                 renderTokens();
             } catch (error) {
+                console.log(error);
                 showNotification('获取 Token 出错');
             }
         }
@@ -902,9 +1586,34 @@
             showNotification('Token 列表已刷新');
         });
 
+        document.getElementById('resetAllQuotasBtn').addEventListener('click', async () => {
+            if (!confirm('确认将所有 Token 额度设置为 80？')) return;
+            try {
+                const payload = { all: true, remainingTokens: 80, totalTokens: 80 };
+                const resp = await fetch('/manager/api/reset_quota', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (resp.ok) {
+                    await fetchTokenMap();
+                    showNotification('全部额度已重置为 80');
+                } else {
+                    showNotification('重置失败');
+                }
+            } catch (err) {
+                showNotification('重置失败');
+            }
+        });
+
         fetchTokenMap();
 
         setInterval(updateExpiredTokenTimers, 1000);
+
+        // 定时刷新统计数据 (每30秒)
+        setInterval(() => {
+            fetchTokenMap();
+        }, 30000);
 
         function showNotification(message) {
             const notification = document.getElementById('notification');

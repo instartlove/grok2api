@@ -21,6 +21,6 @@ services:
       # Request timeout
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-180}
     volumes:
-      - ./data:/data
+      - ./data:/app/data
     ports:
       - 5200:5200

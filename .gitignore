@@ -83,5 +83,6 @@ venv.bak/
 # Ignore local real compose config
 docker-compose.yml
 
-# Ignore git backup directory
-.git.bak*/
+# Ignore script
+reset_tokens.py
+
