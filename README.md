@@ -121,26 +121,6 @@ environment:
 
 ## 快速开始
 
-### 使用 Docker Hub 镜像
-
-现在可以直接从 Docker Hub 拉取预构建的镜像：
-
-```bash
-# 拉取镜像
-docker pull verofess/grok2api
-
-# 运行容器
-docker run -d \
-  --name grok2api \
-  -p 5200:5200 \
-  -e API_KEY=sk-your-api-key \
-  -e SSO=your-sso-token \
-  verofess/grok2api
-
-# 或者使用 docker-compose
-docker-compose up -d
-```
-
 ### Docker Compose 示例
 
 ```yaml
@@ -162,3 +142,67 @@ services:
       - PROXY_VALIDATE_TIMEOUT=15
     restart: unless-stopped
 ```
+
+### Python 直接运行
+
+适合本地开发与快速测试。
+
+1) 准备环境（Python 3.9+）
+```bash
+python -m venv venv
+source venv/bin/activate  # Windows: venv\\Scripts\\activate
+pip install -r requirements.txt
+# 可选（启用动态头时需要）：安装 Playwright 浏览器
+# python -m playwright install
+```
+
+2) 准备配置
+```bash
+cp .env.example .env
+# 编辑 .env，至少填写：
+# API_KEY=sk-your-api-key       # 访问本服务用的密钥（客户端需以 Bearer 传入）
+# SSO=your-sso-token            # Grok 的 SSO Token，多个用英文逗号分隔
+# ADMINPASSWORD=your-password   # 管理面板密码（启用面板时必填）
+
+# 为了最快启动，建议关闭动态头：
+echo "DISABLE_DYNAMIC_HEADERS=true" >> .env
+
+# 注意：程序会把 token_status.json 写到 /data 下，首次本地运行请创建该目录：
+sudo mkdir -p /data  # Windows 可忽略
+```
+
+3) 启动
+```bash
+python app.py
+# 默认端口 5201（可在 .env 里设置 PORT 覆盖）
+```
+
+4) 调用示例
+```bash
+curl -s http://127.0.0.1:5201/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-3",
+    "messages": [{"role":"user","content":"Hello"}],
+    "stream": false
+  }'
+```
+
+5) 管理面板（可选）
+- .env 增加：
+```
+MANAGER_SWITCH=true
+ADMINPASSWORD=your-password
+```
+- 浏览器访问：http://127.0.0.1:5201/manager（先登录 /manager/login）
+
+提示
+- 已实现"积分额度"规则：初始 80 积分；-expert/-imageGen 每次 4 分，其他 1 分；每天（美国时间）刷新。
+- 每次模型请求后会调用官方 rate-limits，同步 remainingTokens 并据此计算各模式可用次数（向下取整）。
+
+## 致谢
+
+感谢 [@VeroFess](https://github.com/VeroFess/grok2api) 提供的原始项目，本项目基于其实现并进行了扩展和改进。
+
+原项目地址：[https://github.com/VeroFess/grok2api](https://github.com/VeroFess/grok2api)
