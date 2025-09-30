@@ -27,6 +27,7 @@
 | `IS_CUSTOM_SSO` | 允许动态 SSO 令牌 | `false` | `true/false` | `true` |
 | `IS_TEMP_CONVERSATION` | 临时对话模式 | `true` | `true/false` | `false` |
 | `SHOW_THINKING` | 显示推理过程 | `false` | `true/false` | `true` |
+| `USE_REASONING_FORMAT` | 思维链格式：`false`=`<think>`标签，`true`=分离的`reasoning_content`字段（类似 OpenAI o1）| `false` | `true/false` | `true` |
 | `SHOW_SEARCH_RESULTS` | 显示搜索结果 | `true` | `true/false` | `false` |
 | `IS_SUPER_GROK` | 启用超级 Grok 功能 | `false` | `true/false` | `true` |
 | `MANAGER_SWITCH` | 启用 Web 管理界面 | - | `true/false` | `true` |
@@ -42,6 +43,26 @@
 | `FILTERED_TAGS` | 过滤标签列表 | `xaiartifact,xai:tool_usage_card,grok:render,details,summary` | 逗号分隔 | `tag1,tag2,tag3` |
 | `TAG_CONFIG` | 过滤标签配置 | `{"xaiartifact":{"behavior":"preserve_content"},"xai:tool_usage_card":{"behavior":"remove_all"},"grok:render":{"behavior":"remove_all"},"details":{"behavior":"preserve_content"},"summary":{"behavior":"preserve_content"}}` | json | `{"xaiartifact":{"behavior":"preserve_content"},"xai:tool_usage_card":{"behavior":"remove_all"},"grok:render":{"behavior":"remove_all"},"details":{"behavior":"preserve_content"},"summary":{"behavior":"preserve_content"}}` |
 | `CONTENT_TYPE_MAPPINGS` | 过滤标签重写配置 | 太长了,看源码 | json | {"text/plain":{"stag":"```","etag":"```"},"text/python":{"stag":"```python\n","etag":"\n```"}} |
+
+### 思维链格式配置说明
+
+`USE_REASONING_FORMAT` 环境变量控制推理过程的输出格式：
+
+**默认模式（`USE_REASONING_FORMAT=false`）**：
+- 思考内容包含在 `<think>` 标签中
+- 所有内容（思考+答案）都在 `content` 字段
+- 客户端需要解析标签来分离思考和答案
+- 适合支持自定义标签的客户端
+
+**OpenAI o1 风格（`USE_REASONING_FORMAT=true`）**：
+- 思考内容在独立的 `reasoning_content` 字段
+- 最终答案在 `content` 字段
+- 自动移除 `<think>` 标签
+- 更好的客户端兼容性，推荐使用
+
+**注意**：
+- 两种格式都需要配合 `SHOW_THINKING=true` 才会输出思考内容
+- 当 `SHOW_SEARCH_RESULTS=true` 时，网页搜索结果也会包含在思维链中（`<think>` 标签内或 `reasoning_content` 字段）
 
 ### 标签过滤配置
 

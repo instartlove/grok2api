@@ -20,6 +20,8 @@ from pathlib import Path
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
+from datetime import datetime, timedelta
+import pytz
 
 import requests
 from flask import (
@@ -35,28 +37,26 @@ from flask import (
 from curl_cffi import requests as curl_requests
 from dotenv import load_dotenv
 
-# Load environment variables from a local .env file early so ConfigurationManager
-# (which reads from os.environ) can see them.
+# 提前加载本地 .env 环境变量，便于 ConfigurationManager 从 os.environ 读取。
 load_dotenv()
 from werkzeug.middleware.proxy_fix import ProxyFix
 from playwright.async_api import async_playwright, Browser, BrowserContext
 
 ############################################################
-# Dynamic Proxy Manager
+# 动态代理管理器（Dynamic Proxy Manager）
 #
-# Allows fetching a proxy from a user-provided API endpoint,
-# validates the proxy against a target URL (default grok.com),
-# caches the working proxy, and retries with new proxies if
-# validation fails. Intended to help bypass CF challenges by
-# rotating egress IPs automatically.
+# - 从外部 API 获取代理
+# - 访问指定校验 URL（默认 https://grok.com/）验证是否可用
+# - 缓存可用代理；验证失败时继续轮换新代理
+# - 通过自动轮换出口 IP，尽量绕过 Cloudflare 挑战
 ############################################################
 class DynamicProxyManager:
-    """Manage dynamic proxies fetched from an external API."""
+    """从外部 API 获取并管理动态代理。"""
 
     def __init__(self, config: "ConfigurationManager"):
         self._config = config
         self._api_url: Optional[str] = config.get("API.DYNAMIC_PROXY_API")
-        # Default retry limit 20 as requested by user
+        # 默认重试上限 20（用户需求）
         self._retry_limit: int = int(config.get("API.PROXY_RETRY_LIMIT", 20))
         self._validate_url: str = config.get(
             "API.PROXY_VALIDATE_URL", "https://grok.com/"
@@ -66,7 +66,7 @@ class DynamicProxyManager:
         self._lock = threading.Lock()
 
     def _normalize_proxy(self, candidate: str) -> Optional[str]:
-        """Ensure proxy string has scheme; default to http:// if absent."""
+        """规范化代理地址；若无协议前缀则补为 http://。"""
         if not candidate:
             return None
         proxy = candidate.strip()
@@ -75,10 +75,9 @@ class DynamicProxyManager:
         return proxy
 
     def _fetch_proxy_from_api(self) -> Optional[str]:
-        """Fetch a proxy string from the dynamic proxy API.
+        """从动态代理 API 拉取代理。
 
-        Supports plain text or JSON responses. For JSON, attempts
-        common keys: proxy, url, http, https, server.
+        支持纯文本或 JSON 返回；若为 JSON，则按常见键名提取：proxy、url、http、https、server。
         """
         if not self._api_url:
             return None
@@ -95,7 +94,7 @@ class DynamicProxyManager:
             if not text:
                 return None
 
-            # Try JSON first
+            # 优先尝试按 JSON 解析
             proxy_candidate: Optional[str] = None
             if text.startswith("{"):
                 try:
@@ -106,7 +105,7 @@ class DynamicProxyManager:
                             proxy_candidate = val.strip()
                             break
                 except Exception:
-                    # Fallback to raw text parsing below
+                    # 解析失败则回退到纯文本
                     pass
 
             if not proxy_candidate:
@@ -131,7 +130,7 @@ class DynamicProxyManager:
         return False
 
     def _validate_proxy(self, proxy_url: str) -> bool:
-        """Validate the proxy by hitting the validate URL and checking CF page."""
+        """访问验证 URL 并判断是否触发 CF 挑战，用于验证代理是否可用。"""
         try:
             proxy_cfg = UtilityFunctions.get_proxy_configuration(proxy_url)
 
@@ -142,7 +141,7 @@ class DynamicProxyManager:
                 "Referer": "https://grok.com/",
             }
 
-            # If user provided cf_clearance, include it to maximize pass rate
+            # 若用户提供了 cf_clearance，则附加到 Cookie 提高通过率
             cf_clearance = self._config.get("SERVER.CF_CLEARANCE", "")
             cookie_header = cf_clearance if cf_clearance else None
 
@@ -164,11 +163,11 @@ class DynamicProxyManager:
                 print("Proxy validation failed due to CF challenge", "DynamicProxy")
                 return False
 
-            # Accept 2xx/3xx as valid
+            # 2xx/3xx 认为有效
             if 200 <= resp.status_code < 400:
                 return True
 
-            # For other statuses, consider invalid
+            # 其他状态码视为无效
             print(f"Proxy validation received status {resp.status_code}", "DynamicProxy")
             return False
         except Exception as e:
@@ -176,12 +175,12 @@ class DynamicProxyManager:
             return False
 
     def get_working_proxy(self) -> Optional[str]:
-        """Get a working proxy, using cache or rotating via API up to retry limit."""
+        """获取可用代理：优先用缓存；否则从 API 轮换直至达到重试上限。"""
         if not self._api_url:
             return None
 
         with self._lock:
-            # Re-validate cached proxy quickly
+            # 快速复验缓存代理
             if self._cached_proxy and self._validate_proxy(self._cached_proxy):
                 return self._cached_proxy
 
@@ -223,12 +222,10 @@ def get_proxy_manager(config: "ConfigurationManager") -> DynamicProxyManager:
 
 class PlaywrightStatsigManager:
     """
-    x-statsig-id capture using Playwright (adapted from Grok3API driver.py)
-
-    This approach captures authentic x-statsig-id headers by:
-    1. Patching window.fetch to intercept grok.com's own API calls
-    2. Triggering a real request on grok.com to generate authentic headers
-    3. Capturing and storing the real x-statsig-id for reuse
+    使用 Playwright 抓取真实的 x-statsig-id（改造自 Grok3API 的 driver.py）：
+    1) 在页面内覆盖 window.fetch 拦截对 grok.com 的请求；
+    2) 触发一次真实访问以生成真实请求头；
+    3) 抓取并缓存 x-statsig-id 以复用。
     """
 
     def __init__(self, proxy_url: Optional[str] = None):
@@ -242,7 +239,7 @@ class PlaywrightStatsigManager:
         self._proxy_url = proxy_url
 
     def _run_async(self, coro):
-        """Run async function in thread-safe manner"""
+        """线程安全地运行异步函数。"""
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -257,7 +254,7 @@ class PlaywrightStatsigManager:
             return asyncio.run(coro)
 
     async def _ensure_browser(self):
-        """Ensure browser is available and ready"""
+        """确保浏览器上下文可用并初始化。"""
         if not self._context:
             self._playwright = await async_playwright().start()
 
@@ -269,7 +266,7 @@ class PlaywrightStatsigManager:
             if self._proxy_url:
                 context_options["proxy"] = {"server": self._proxy_url}
 
-            # Use Google Chrome channel as originally configured.
+            # 按既定方案使用 Google Chrome 渠道
             self._context = await self._playwright.chromium.launch_persistent_context(
                 user_data_dir="./data/chrome",
                 headless=True,
@@ -292,7 +289,7 @@ class PlaywrightStatsigManager:
             )
 
     async def check_real_ip(self) -> str:
-        """Check the real IP address using Playwright browser"""
+        """通过 Playwright 检测当前出口真实 IP。"""
         try:
             await self._ensure_browser()
             page = await self._context.new_page()  # type: ignore
@@ -335,7 +332,7 @@ class PlaywrightStatsigManager:
             return "failed"
 
     async def _cleanup(self):
-        """Clean up browser resources"""
+        """清理浏览器资源。"""
         if self._context:
             await self._context.close()
             self._context = None
@@ -344,12 +341,12 @@ class PlaywrightStatsigManager:
             self._playwright = None
 
     def cleanup(self):
-        """Synchronous cleanup wrapper"""
+        """同步封装的清理函数。"""
         if self._context:
             self._run_async(self._cleanup())
 
     async def _patch_fetch_for_statsig(self, page):
-        """Patch window.fetch to intercept x-statsig-id headers (adapted from driver.py)"""
+        """在页面内覆盖 window.fetch 以拦截 x-statsig-id 请求头。"""
         result = await page.evaluate(
             """
             (() => {
@@ -406,7 +403,7 @@ class PlaywrightStatsigManager:
         print(f"Fetch patching result: {result}")
 
     async def _initiate_answer(self, page):
-        """Trigger a real request to grok.com to capture x-statsig-id"""
+        """触发一次对 grok.com 的真实请求以捕获 x-statsig-id。"""
         try:
 
             await page.wait_for_selector("div.relative.z-10 textarea", timeout=30000)
@@ -432,7 +429,7 @@ class PlaywrightStatsigManager:
     async def _capture_statsig_id_async(
         self, restart_session: bool = False
     ) -> Optional[str]:
-        """Capture x-statsig-id from real grok.com interaction"""
+        """通过与 grok.com 的真实交互获取 x-statsig-id。"""
         try:
             await self._ensure_browser()
             page = await self._context.new_page()  # type: ignore
@@ -511,23 +508,23 @@ class PlaywrightStatsigManager:
             return None
 
     def capture_statsig_id(self, restart_session: bool = False) -> Optional[str]:
-        """Capture x-statsig-id (sync wrapper)"""
+        """抓取 x-statsig-id（同步封装）。"""
         with self._lock:
             return self._run_async(self._capture_statsig_id_async(restart_session))
 
     def check_real_ip_sync(self) -> str:
-        """Check real IP address (sync wrapper)"""
+        """检测真实 IP（同步封装）。"""
         with self._lock:
             return self._run_async(self.check_real_ip())
 
     def generate_xai_request_id(self) -> str:
-        """Generate x-xai-request-id (simple UUID)"""
+        """生成 x-xai-request-id（UUID）。"""
         return str(uuid.uuid4())
 
     def get_dynamic_headers(
         self, method: str = "POST", pathname: str = "/rest/app-chat/conversations/new"
     ) -> Dict[str, str]:
-        """Get dynamic headers including captured x-statsig-id and x-xai-request-id"""
+        """获取动态请求头，包含抓取到的 x-statsig-id 与 x-xai-request-id。"""
         headers = {}
 
         current_time = int(time.time())
@@ -554,7 +551,7 @@ class PlaywrightStatsigManager:
 
         headers["x-xai-request-id"] = self.generate_xai_request_id()
 
-        print(f"Generated dynamic headers: {list(headers.keys())}")
+        
         return headers
 
 
@@ -562,14 +559,14 @@ _global_statsig_manager: Optional[PlaywrightStatsigManager] = None
 
 
 def initialize_statsig_manager(proxy_url: Optional[str] = None) -> None:
-    """Initialize the global StatsigManager instance with configuration"""
+    """按配置初始化全局 StatsigManager 实例。"""
     global _global_statsig_manager
     if _global_statsig_manager is None:
         _global_statsig_manager = PlaywrightStatsigManager(proxy_url=proxy_url)
 
 
 def get_statsig_manager() -> PlaywrightStatsigManager:
-    """Get or create the global StatsigManager instance"""
+    """获取（或创建）全局 StatsigManager 实例。"""
     global _global_statsig_manager
     if _global_statsig_manager is None:
         _global_statsig_manager = PlaywrightStatsigManager()
@@ -577,9 +574,9 @@ def get_statsig_manager() -> PlaywrightStatsigManager:
 
 
 class ModelType(Enum):
-    """Supported Grok model types (redefined)."""
+    """支持的 Grok 模型类型（重定义）。"""
 
-    # Keep
+    # 保留
     GROK_3 = "grok-3"
     GROK_3_SEARCH = "grok-3-search"
     GROK_4 = "grok-4"
@@ -587,21 +584,21 @@ class ModelType(Enum):
     GROK_4_IMAGEGEN = "grok-4-imageGen"
     GROK_3_IMAGEGEN = "grok-3-imageGen"
 
-    # Add expert variants
+    # 增加 expert 变体
     GROK_4_EXPERT = "grok-4-expert"
     GROK_4_FAST_EXPERT = "grok-4-fast-expert"
 
 
 
 class TokenType(Enum):
-    """Token privilege levels."""
+    """Token 权限级别。"""
 
     NORMAL = "normal"
     SUPER = "super"
 
 
 class ResponseState(Enum):
-    """Response processing states."""
+    """响应处理状态。"""
 
     IDLE = "idle"
     THINKING = "thinking"
@@ -635,28 +632,49 @@ BASE_HEADERS = {
 }
 
 
+def build_cookie(auth_token: str, cf_clearance: str = "") -> str:
+    """构建完整的 Cookie 字符串，包含语言设置。
+    
+    Args:
+        auth_token: 认证 token (sso-rw=xxx;sso=xxx)
+        cf_clearance: Cloudflare clearance token (可选)
+    
+    Returns:
+        完整的 Cookie 字符串
+    """
+    cookie_parts = [auth_token]
+    
+    # 添加 Cloudflare clearance
+    if cf_clearance:
+        cookie_parts.append(cf_clearance)
+    
+    # 添加语言设置，影响 Grok 的时区和语言响应
+    cookie_parts.append("i18nextLng=zh")
+    
+    return ";".join(cookie_parts)
+
+
 def get_dynamic_headers(
     method: str = "POST",
     pathname: str = "/rest/app-chat/conversations/new",
     config: Optional["ConfigurationManager"] = None,
 ) -> Dict[str, str]:
     """
-    Get headers with dynamic x-statsig-id and x-xai-request-id or fallback headers
+    生成请求头：优先使用动态头（x-statsig-id + x-xai-request-id），否则回退到静态头。
 
-    Args:
-        method: HTTP method for the request
-        pathname: Request pathname for statsig generation
-        config: Configuration manager to check if dynamic headers are disabled
+    参数：
+      - method: HTTP 方法
+      - pathname: 参与生成 statsig 的请求路径
+      - config: 配置（用于判断是否禁用动态请求头）
 
-    Returns:
-        Dictionary with all headers including dynamic ones or fallback
+    返回：包含所有必要字段的请求头字典。
     """
     try:
         headers = BASE_HEADERS.copy()
 
-        # Check if dynamic headers are disabled
+        # 若禁用动态请求头，则直接返回回退头
         if config and config.get("API.DISABLE_DYNAMIC_HEADERS", False):
-            print("Dynamic headers disabled, using fallback headers")
+            
             headers["x-xai-request-id"] = str(uuid.uuid4())
             headers["x-statsig-id"] = (
                 "ZTpUeXBlRXJyb3I6IENhbm5vdCByZWFkIHByb3BlcnRpZXMgb2YgdW5kZWZpbmVkIChyZWFkaW5nICdjaGlsZE5vZGVzJyk="
@@ -668,7 +686,7 @@ def get_dynamic_headers(
 
         headers.update(dynamic_headers)
 
-        print(f"Generated dynamic headers for {method} {pathname}")
+        
         return headers
 
     except Exception as e:
@@ -684,7 +702,7 @@ def get_dynamic_headers(
 
 
 class GrokApiException(Exception):
-    """Base exception for Grok API errors."""
+    """Grok API 相关的基础异常类型。"""
 
     def __init__(self, message: str, error_code: str = "UNKNOWN_ERROR"):
         super().__init__(message)
@@ -692,32 +710,32 @@ class GrokApiException(Exception):
 
 
 class TokenException(GrokApiException):
-    """Token-related exceptions."""
+    """Token 相关异常。"""
 
     pass
 
 
 class ValidationException(GrokApiException):
-    """Input validation exceptions."""
+    """输入校验异常。"""
 
     pass
 
 
 class RateLimitException(GrokApiException):
-    """Rate limiting exceptions."""
+    """限流相关异常。"""
 
     pass
 
 
 @dataclass
 class TokenCredential:
-    """Represents a token credential with validation."""
+    """带格式校验的 Token 凭据。"""
 
     sso_token: str
     token_type: TokenType
 
     def __post_init__(self):
-        """Validate token format."""
+        """校验 token 格式。"""
         if not self.sso_token or not self.sso_token.strip():
             raise ValidationException("SSO token cannot be empty")
         if "sso=" not in self.sso_token:
@@ -735,7 +753,7 @@ class TokenCredential:
     def from_raw_token(
         cls, raw_token: str, token_type: TokenType = TokenType.NORMAL
     ) -> "TokenCredential":
-        """Create TokenCredential from raw SSO value."""
+        """根据原始 SSO 值创建 TokenCredential。"""
         if not raw_token or not raw_token.strip():
             raise ValidationException("Raw token cannot be empty")
 
@@ -747,7 +765,7 @@ class TokenCredential:
         return cls(formatted_token, token_type)
 
     def extract_sso_value(self) -> str:
-        """Extract the SSO value from the token."""
+        """从 token 中提取 SSO 值。"""
         try:
             return self.sso_token.split("sso=")[1].split(";")[0]
         except (IndexError, AttributeError) as e:
@@ -756,31 +774,30 @@ class TokenCredential:
 
 @dataclass
 class GeneratedImage:
-    """Represents a generated image with metadata."""
+    """带元数据的生成图片。"""
 
     url: str
     base_url: str = "https://assets.grok.com"
     cookies: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
-        """Validate image data."""
+        """校验图片数据。"""
         if not self.url:
             raise ValidationException("Image URL cannot be empty")
 
 
 @dataclass
 class ProcessingState:
-    """Immutable state for response processing."""
+    """响应处理用的不可变状态。"""
 
     is_thinking: bool = False
     is_generating_image: bool = False
     image_generation_phase: int = 0
-    # Indicates we've already emitted the first closing </think>.
-    # After this becomes True, any subsequent isThinking/webSearchResults should be ignored.
+    # 已经输出过第一个 </think>；之后的 isThinking/webSearchResults 都会被忽略
     is_thinking_end: bool = False
 
     def with_thinking(self, thinking: bool) -> "ProcessingState":
-        """Return new state with updated thinking status."""
+        """返回带更新思考标记的新状态。"""
         return ProcessingState(
             thinking,
             self.is_generating_image,
@@ -791,7 +808,7 @@ class ProcessingState:
     def with_image_generation(
         self, generating: bool, phase: int = 0
     ) -> "ProcessingState":
-        """Return new state with updated image generation status."""
+        """返回带更新图片生成状态的新状态。"""
         return ProcessingState(
             self.is_thinking,
             generating,
@@ -800,7 +817,7 @@ class ProcessingState:
         )
 
     def with_thinking_end(self, thinking_end: bool = True) -> "ProcessingState":
-        """Return new state with updated thinking-end status."""
+        """返回带更新“思考结束”标记的新状态。"""
         return ProcessingState(
             self.is_thinking,
             self.is_generating_image,
@@ -811,7 +828,7 @@ class ProcessingState:
 
 @dataclass
 class ModelResponse:
-    """Enhanced model response with proper validation and transformation."""
+    """带校验与转换的模型响应对象。"""
 
     response_id: str
     message: str
@@ -840,7 +857,7 @@ class ModelResponse:
     def from_api_response(
         cls, data: Dict[str, Any], enable_artifact_files: bool = False
     ) -> "ModelResponse":
-        """Create ModelResponse from API response data with validation."""
+        """根据 API 响应数据构建 ModelResponse，并做必要校验。"""
         try:
             response_id = str(data.get("responseId", ""))
             sender = str(data.get("sender", ""))
@@ -904,13 +921,13 @@ class ModelResponse:
     @staticmethod
     def _transform_xai_artifacts(text: str) -> str:
         """
-        Transform xaiArtifact blocks to proper markdown code blocks.
-        Comprehensive version that handles all xaiArtifact formats including:
-        1. <xaiArtifact contentType="text/..."> blocks → ```<lang>\ncode\n```
-        2. ```x-<lang>src format → ```<lang>
-        3. ```x-<lang> format → ```<lang>
-        4. Any xaiArtifact with artifact_id, title, etc.
-        5. Self-closing xaiArtifact tags
+        将 xaiArtifact 标签转换为合适的 Markdown 代码块。
+        覆盖所有常见格式：
+        1. <xaiArtifact contentType="text/..."> … → ```<lang>\ncode\n```
+        2. ```x-<lang>src → ```<lang>
+        3. ```x-<lang> → ```<lang>
+        4. 包含 artifact_id、title 等属性的标签
+        5. 自闭合的 xaiArtifact 标签
         """
         if not text:
             return text
@@ -961,7 +978,7 @@ class ModelResponse:
 
 @dataclass
 class GrokResponse:
-    """Complete Grok API response wrapper."""
+    """Grok API 响应的完整封装。"""
 
     model_response: ModelResponse
     is_thinking: bool = False
@@ -979,7 +996,7 @@ class GrokResponse:
     def from_api_response(
         cls, data: Dict[str, Any], enable_artifact_files: bool = False
     ) -> "GrokResponse":
-        """Create GrokResponse from API response data."""
+        """根据 API 响应数据构建 GrokResponse。"""
         try:
             error = data.get("error")
             error_code = data.get("error_code")
@@ -1024,10 +1041,10 @@ class GrokResponse:
 
 
 class ConfigurationManager:
-    """Centralized configuration management with validation."""
+    """集中式配置管理，包含校验逻辑。"""
 
     def __init__(self):
-        """Initialize configuration with environment variables."""
+        """从环境变量初始化配置。"""
         self.data_dir = Path("./data")
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1035,7 +1052,7 @@ class ConfigurationManager:
         self._validate_configuration()
 
     def _load_configuration(self) -> Dict[str, Any]:
-        """Load configuration from environment variables."""
+        """从环境变量构建配置字典。"""
         return {
             "MODELS": {
                 model.value: model.value.split("-")[0] + "-" + model.value.split("-")[1]
@@ -1050,7 +1067,7 @@ class ConfigurationManager:
                 "API_KEY": os.environ.get("API_KEY", "sk-123456"),
                 "RETRY_TIME": 1000,
                 "PROXY": os.environ.get("PROXY"),
-                # Dynamic proxy settings
+                # 动态代理设置
                 "DYNAMIC_PROXY_API": os.environ.get("DYNAMIC_PROXY_API"),
                 "PROXY_RETRY_LIMIT": int(os.environ.get("PROXY_RETRY_LIMIT", "20")),
                 "PROXY_VALIDATE_URL": os.environ.get(
@@ -1062,9 +1079,9 @@ class ConfigurationManager:
                 "DISABLE_DYNAMIC_HEADERS": self._get_bool_env(
                     "DISABLE_DYNAMIC_HEADERS", False
                 ),
-                # Request timeouts (seconds)
-                # REQUEST_TIMEOUT: non-stream requests overall timeout
-                # STREAM_TIMEOUT: streaming requests overall timeout/low-speed window
+                # 请求超时（秒）
+                # REQUEST_TIMEOUT：非流式整体超时
+                # STREAM_TIMEOUT：流式整体超时/低速窗口
                 "REQUEST_TIMEOUT": int(os.environ.get("REQUEST_TIMEOUT", "120")),
                 "STREAM_TIMEOUT": int(os.environ.get("STREAM_TIMEOUT", "600")),
             },
@@ -1083,7 +1100,9 @@ class ConfigurationManager:
             "TOKEN_STATUS_FILE": str(self.data_dir / "token_status.json"),
             "SHOW_THINKING": self._get_bool_env("SHOW_THINKING", False),
             "SHOW_SEARCH_RESULTS": self._get_bool_env("SHOW_SEARCH_RESULTS", True),
-            # Collapse multiple <think> segments into a single reasoning block
+            # 思维链格式：false=<think>标签，true=OpenAI o1风格的reasoning_content
+            "USE_REASONING_FORMAT": self._get_bool_env("USE_REASONING_FORMAT", False),
+            # 是否将多个 <think> 片段合并为一个“思考”区域
             "COALESCE_THINKING": self._get_bool_env("COALESCE_THINKING", True),
             "IS_SUPER_GROK": self._get_bool_env("IS_SUPER_GROK", False),
             "FILTERED_TAGS": self._get_list_env(
@@ -1102,18 +1121,18 @@ class ConfigurationManager:
         }
 
     def _get_bool_env(self, key: str, default: bool = False) -> bool:
-        """Get boolean environment variable."""
+        """读取布尔型环境变量。"""
         return os.environ.get(key, str(default)).lower() == "true"
 
     def _get_list_env(self, key: str, default: List[str]) -> List[str]:
-        """Get comma-separated list from environment variable."""
+        """读取逗号分隔的列表型环境变量。"""
         value = os.environ.get(key)
         if not value:
             return default
         return [tag.strip() for tag in value.split(",") if tag.strip()]
 
     def _get_content_type_mappings(self) -> Dict[str, Dict[str, str]]:
-        """Get content type mappings from environment or defaults."""
+        """读取内容类型到代码块包裹符的映射（来自环境变量或默认值）。"""
         mappings_env = os.environ.get("CONTENT_TYPE_MAPPINGS")
         if mappings_env:
             try:
@@ -1229,7 +1248,7 @@ class ConfigurationManager:
         }
 
     def _get_tag_config(self) -> Dict[str, Dict[str, Any]]:
-        """Get tag configuration from environment or defaults."""
+        """读取被过滤标签配置（来自环境变量或默认值）。"""
         tag_config_env = os.environ.get("TAG_CONFIG")
         if tag_config_env:
             try:
@@ -1262,7 +1281,7 @@ class ConfigurationManager:
         return default_config
 
     def _validate_configuration(self) -> None:
-        """Validate configuration settings."""
+        """校验配置项的有效性。"""
         issues = []
 
         if not os.environ.get("API_KEY"):
@@ -1289,7 +1308,7 @@ class ConfigurationManager:
             print("Configuration validation passed")
 
     def get(self, key_path: str, default: Any = None) -> Any:
-        """Get configuration value using dot notation."""
+        """用点号路径读取配置值。"""
         keys = key_path.split(".")
         value = self._config
 
@@ -1302,7 +1321,7 @@ class ConfigurationManager:
         return value
 
     def set(self, key_path: str, value: Any) -> None:
-        """Set configuration value using dot notation."""
+        """用点号路径写入配置值。"""
         keys = key_path.split(".")
         config = self._config
 
@@ -1315,25 +1334,25 @@ class ConfigurationManager:
 
     @property
     def models(self) -> Dict[str, str]:
-        """Get supported models mapping."""
+        """返回受支持模型的映射表。"""
         return self._config["MODELS"]
 
     @property
     def data_directory(self) -> Path:
-        """Get data directory path."""
+        """返回 data 目录路径。"""
         return self.data_dir
 
 
 class UtilityFunctions:
-    """Collection of utility functions for common operations."""
+    """常用工具函数集合。"""
 
     @staticmethod
     def get_proxy_configuration(proxy_url: Optional[str]) -> Dict[str, Any]:
-        """Get proxy configuration for requests."""
+        """构造 requests/curl_cffi 可接受的代理配置。"""
         if not proxy_url:
             return {}
 
-        print(f"Using proxy: {proxy_url}")
+        
 
         if proxy_url.startswith("socks5://"):
             proxy_config: Dict[str, Any] = {"proxy": proxy_url}
@@ -1350,7 +1369,7 @@ class UtilityFunctions:
 
     @staticmethod  
     def organize_search_results(search_results: Dict[str, Any]) -> str:  
-        """Format search results for display."""  
+        """格式化搜索结果用于展示。"""  
         if not search_results or "results" not in search_results:  
             return ""  
 
@@ -1412,12 +1431,19 @@ class UtilityFunctions:
         # 移除表格分隔符
         text = re.sub(r'\|', ' ', text)
         
-        return text
+        # 移除多余的换行（保留段落之间的单个换行）
+        text = re.sub(r'\n{3,}', '\n\n', text)  # 将3个及以上的换行替换为2个
+        text = re.sub(r'\n+', ' ', text)  # 将所有换行替换为空格
+        
+        # 移除多余的空格
+        text = re.sub(r'\s{2,}', ' ', text)
+        
+        return text.strip()
 
 
     @staticmethod
     def parse_error_response(response_text: str) -> Dict[str, Any]:
-        """Parse error response with structured handling."""
+        """解析错误响应，返回结构化信息。"""
         if not response_text or not response_text.strip():
             return {
                 "error_code": "EMPTY_RESPONSE",
@@ -1513,7 +1539,7 @@ class UtilityFunctions:
     def create_retry_decorator(
         max_attempts: int = MAX_RETRY_ATTEMPTS, base_delay: float = BASE_RETRY_DELAY
     ):
-        """Create retry decorator with exponential backoff."""
+        """生成带指数退避的重试装饰器。"""
 
         def retry_decorator(func):
             @functools.wraps(func)
@@ -1550,7 +1576,7 @@ class UtilityFunctions:
 
     @staticmethod
     async def run_in_thread_pool(func, *args, **kwargs):
-        """Run synchronous function in thread pool for async compatibility."""
+        """在线程池运行同步函数，兼容异步调用。"""
         try:
             loop = asyncio.get_running_loop()
             ctx = contextvars.copy_context()
@@ -1565,7 +1591,7 @@ class UtilityFunctions:
     def create_structured_error_response(
         error_data: Union[str, Dict[str, Any]], status_code: int = 500
     ) -> Tuple[Dict[str, Any], int]:
-        """Create structured error response."""
+        """创建结构化错误响应。"""
         if isinstance(error_data, str):
             error_data = UtilityFunctions.parse_error_response(error_data)
 
@@ -1588,7 +1614,7 @@ class UtilityFunctions:
 
 @dataclass
 class TokenEntry:
-    """Represents a single token entry with usage tracking."""
+    """单个 Token 条目，包含用量跟踪。"""
 
     credential: TokenCredential
     max_request_count: int
@@ -1597,40 +1623,40 @@ class TokenEntry:
     start_call_time: Optional[int] = None
 
     def is_available(self) -> bool:
-        """Check if token is available for use."""
+        """判断是否仍可使用。"""
         return self.request_count < self.max_request_count
 
     def can_be_reset(self, expiration_time_ms: int, current_time_ms: int) -> bool:
-        """Check if token can be reset based on expiration time."""
+        """根据过期时间判断是否可重置。"""
         if not self.start_call_time:
             return False
         return current_time_ms - self.start_call_time >= expiration_time_ms
 
     def use_token(self) -> None:
-        """Mark token as used."""
+        """标记一次使用。"""
         if not self.start_call_time:
             self.start_call_time = int(time.time() * 1000)
         self.request_count += 1
 
     def reset_usage(self) -> None:
-        """Reset token usage counters."""
+        """重置使用计数。"""
         self.request_count = 0
         self.start_call_time = None
 
 
 @dataclass
 class ModelLimits:
-    """Configuration for model request limits."""
+    """模型请求限额配置。"""
 
     request_frequency: int
     expiration_time_ms: int
 
 
 class ThreadSafeTokenManager:
-    """Thread-safe token management with proper synchronization."""
+    """线程安全的 Token 管理器（含同步机制）。"""
 
     def __init__(self, config: ConfigurationManager):
-        """Initialize token manager with configuration."""
+        """用配置初始化 Token 管理器。"""
         self.config = config
         self._lock = threading.RLock()
         self._token_storage: Dict[str, List[TokenEntry]] = {}
@@ -1641,15 +1667,14 @@ class ThreadSafeTokenManager:
         self._load_token_status()
 
     def _normalize_model_name(self, model: str) -> str:
-        """Normalize model name for consistent lookup.
+        """标准化模型名，便于统一查找。
 
-        Rules:
-        - First map external alias to internal id via config.models if present
-        - Then collapse base families (e.g. grok-4-mini-*, grok-4-*, grok-3-*) to
-          'grok-4' / 'grok-3'
+        规则：
+        - 若存在外部别名，通过 config.models 映射到内部 id；
+        - 将基础族（如 grok-4-mini-*、grok-4-*、grok-3-*）折叠为 'grok-4' 或 'grok-3'。
         """
         try:
-            # Map external alias (e.g. gpt-4-fast -> grok-4-mini-thinking-tahoe)
+            # 将外部别名映射为内部 id（例如 gpt-4-fast -> grok-4-mini-thinking-tahoe）
             mapped = self.config.models.get(model, model) if hasattr(self, 'config') else model
         except Exception:
             mapped = model
@@ -1660,7 +1685,7 @@ class ThreadSafeTokenManager:
         return mapped
 
     def _save_token_status(self) -> None:
-        """Save token status to persistent storage."""
+        """将 token 状态写入持久化存储。"""
         try:
             status_file = Path(self.config.get("TOKEN_STATUS_FILE"))
             with open(status_file, "w", encoding="utf-8") as f:
@@ -1672,10 +1697,10 @@ class ThreadSafeTokenManager:
             traceback.print_exc()
 
     def _load_token_status(self) -> None:
-        """Load token status from persistent storage and reconstruct token storage."""
+        """从持久化存储加载 token 状态，并重建内存结构。"""
         try:
-            status_file = Path(self.config.get("TOKEN_STATUS_FILE"))  # ./data/token_status.json
-            fallback_file = Path("data/token_status.json")            # ./data/token_status.json
+            status_file = Path(self.config.get("TOKEN_STATUS_FILE"))  # ./data/token_status.json 路径
+            fallback_file = Path("data/token_status.json")            # 兼容旧路径 ./data/token_status.json
             load_path = None
 
             if status_file.exists():
@@ -1695,23 +1720,20 @@ class ThreadSafeTokenManager:
             self._token_status = {}
 
     def _reconstruct_token_storage(self) -> None:
-        """Reconstruct _token_storage from _token_status.
+        """根据 _token_status 重建 _token_storage。
 
-        Note: In the new quota-based system, _token_storage is largely deprecated,
-        but we keep this method for backward compatibility.
+        说明：在新的“配额制”方案中，_token_storage 基本不再使用，此方法仅为兼容保留。
         """
         try:
             reconstructed_count = 0
             for sso_value, token_data in self._token_status.items():
-                # In the new structure, token information is stored at the top level
-                # We don't need to reconstruct individual model entries since we use quota-based system
+                # 新结构下，token 信息存于顶层；采用配额制后无需逐模型重建
 
-                # Skip if this doesn't look like a valid token structure
+                # 若结构不合法则跳过
                 if not isinstance(token_data, dict) or "quota" not in token_data:
                     continue
 
-                # For backward compatibility, we might still need to handle legacy model-based entries
-                # but in the new system, we primarily rely on quota-based validation
+                # 为兼容旧版，保留对按模型存储的处理；但新系统以配额制为准
                 reconstructed_count += 1
 
             if reconstructed_count > 0:
@@ -1722,15 +1744,11 @@ class ThreadSafeTokenManager:
             traceback.print_exc()
 
     def _ensure_quota_defaults_for_all(self) -> None:
-        """Ensure every token in status map has default quota/counts for UI display.
-
-        This is mainly for backward-compatibility when loading older token_status.json
-        which does not have the new quota/counts structure yet.
-        """
+        """为所有 token 补齐默认配额/计数（兼容旧版 token_status.json）。"""
         try:
             changed = False
             for sso_value, token_data in self._token_status.items():
-                # Ensure we're working with a valid dict structure
+                # 确保结构为有效的 dict
                 if not isinstance(token_data, dict):
                     print(f"Invalid token data structure for {sso_value}")
                     continue
@@ -1739,7 +1757,7 @@ class ThreadSafeTokenManager:
                 counts = token_data.get("counts")
 
                 if quota is None or counts is None:
-                    # Default: 80 total/remaining points
+                    # 默认：80 总额度/剩余额度
                     remaining = 80
                     total = 80
                     fast_counts = int(math.floor(remaining / 1))
@@ -1758,7 +1776,7 @@ class ThreadSafeTokenManager:
                         "imageGen": imagegen_counts,
                     }
 
-                    # Initialize modelStats if missing
+                    # 初始化 modelStats（若不存在）
                     if "modelStats" not in self._token_status[sso_value]:
                         self._token_status[sso_value]["modelStats"] = {}
                         for model_type in ModelType:
@@ -1770,7 +1788,7 @@ class ThreadSafeTokenManager:
                                 "lastFailureResponse": None
                             }
 
-                    # Ensure basic status fields exist
+                    # 确保基础状态字段存在
                     if "isSuper" not in self._token_status[sso_value]:
                         self._token_status[sso_value]["isSuper"] = False
                     if "isExpired" not in self._token_status[sso_value]:
@@ -1790,7 +1808,7 @@ class ThreadSafeTokenManager:
     def record_token_failure(
         self, model: str, token_string: str, failure_reason: str, status_code: int
     ) -> None:
-        """Record a token failure and potentially mark as expired."""
+        """记录一次 token 失败，并在必要时标记为过期。"""
         with self._lock:
             try:
                 credential = TokenCredential(token_string, TokenType.NORMAL)
@@ -1839,7 +1857,7 @@ class ThreadSafeTokenManager:
                 print(f"Failed to record token failure: {e}")
 
     def _is_token_expired(self, token_entry: TokenEntry, model: str) -> bool:
-        """Check if a token is marked as expired."""
+        """检查 token 是否被标记为过期。"""
         try:
             sso_value = token_entry.credential.extract_sso_value()
             if (
@@ -1856,16 +1874,16 @@ class ThreadSafeTokenManager:
     def add_token(
         self, credential: TokenCredential, is_initialization: bool = False
     ) -> bool:
-        """Add token to the management system."""
+        """向系统添加 token。"""
         with self._lock:
             try:
                 sso_value = credential.extract_sso_value()
 
-                # Initialize token status bucket with quota and modelStats
+                # 初始化 token 状态桶（配额 + modelStats）
                 if sso_value not in self._token_status:
                     self._token_status[sso_value] = {}
 
-                    # Initialize shared quota (points system)
+                    # 初始化共享配额（积分制）
                     self._token_status[sso_value]["quota"] = {
                         "windowSizeSeconds": None,
                         "totalTokens": 80,
@@ -1873,19 +1891,19 @@ class ThreadSafeTokenManager:
                         "updatedAt": int(time.time() * 1000),
                     }
 
-                    # Initialize counts for different model types
+                    # 为不同模型类型初始化计数
                     self._token_status[sso_value]["counts"] = {
                         "fast": 80,
                         "expert": 20,
                         "imageGen": 20,
                     }
 
-                    # Initialize basic status fields
+                    # 初始化基础状态字段
                     self._token_status[sso_value]["isSuper"] = credential.token_type == TokenType.SUPER
                     self._token_status[sso_value]["isExpired"] = False
                     self._token_status[sso_value]["isValid"] = True
 
-                    # Initialize modelStats for all available models
+                    # 为所有可用模型初始化 modelStats
                     self._token_status[sso_value]["modelStats"] = {}
                     for model_type in ModelType:
                         self._token_status[sso_value]["modelStats"][model_type.value] = {
@@ -1910,15 +1928,15 @@ class ThreadSafeTokenManager:
                 return False
 
     def _is_token_valid_for_model(self, token_entry: TokenEntry, model: str) -> bool:
-        """Check if token is valid for specific model considering both rate limits and quota.
+        """综合限流与配额判断 token 是否可用于指定模型。
 
-        New validation logic:
-        - Check if token is expired (original logic)
-        - Check if token is rate limited (original logic)
-        - Check if token has sufficient quota for model type (new logic)
+        新校验逻辑：
+        - 检查是否过期（旧逻辑）
+        - 检查是否被限流（旧逻辑）
+        - 检查配额是否满足该模型需求（新逻辑）
         """
         try:
-            # Check if token is expired
+            # 检查是否已过期
             if self._is_token_expired(token_entry, model):
                 return False
 
@@ -1926,20 +1944,20 @@ class ThreadSafeTokenManager:
             if sso_value not in self._token_status:
                 return False
 
-            # Check model-specific rate limiting (original logic)
+            # 检查模型层面的限流（旧逻辑）
             if model in self._token_status[sso_value]:
                 model_status = self._token_status[sso_value][model]
                 if not model_status.get("isValid", True):
                     return False
 
-            # Check quota-based validity (new logic)
+            # 检查基于配额的可用性（新逻辑）
             quota_data = self._token_status[sso_value].get("quota", {})
             remaining_tokens = quota_data.get("remainingTokens", 0)
 
-            # Determine required tokens for this model
+            # 计算该模型所需配额
             required_tokens = 4 if model.endswith(("-expert", "-imageGen")) else 1
 
-            # Token is invalid if insufficient quota
+            # 配额不足则视为不可用
             if remaining_tokens < required_tokens:
                 return False
 
@@ -1950,53 +1968,33 @@ class ThreadSafeTokenManager:
             return False
 
     def get_token_for_model(self, model: str) -> Optional[str]:
-        """Get available token for specified model using quota-based validation."""
+        """基于配额规则，获取该模型可用的 token。"""
         with self._lock:
-            # In the new quota-based system, we select from available tokens directly
+        # 新的配额制：直接在可用 token 中选择
             for sso_value, token_data in self._token_status.items():
                 if not isinstance(token_data, dict):
                     continue
 
-                # Check if token is valid and not expired
+                # 检查是否已过期/无效
                 if token_data.get("isExpired", False) or not token_data.get("isValid", True):
                     continue
 
-                # Check quota availability for this model type
+                # 检查该模型类型的剩余额度
                 quota_data = token_data.get("quota", {})
                 remaining_tokens = quota_data.get("remainingTokens", 0)
 
-                # Determine required tokens for this model (use original model name)
+                # 计算所需配额（按原始模型名判断 expert/imageGen）
                 if model.endswith(("-expert", "-imageGen")):
                     required_tokens = 4
                 else:
                     required_tokens = 1
 
-                # Check if sufficient quota
+                # 不足则跳过
                 if remaining_tokens < required_tokens:
                     continue
 
-                # Found a valid token with sufficient quota
-                # Construct the token string
+                # 找到可用 token，构造 token 字符串
                 token_string = f"sso-rw={sso_value};sso={sso_value}"
-
-                # Update model stats for tracking (use original model name, not normalized)
-                try:
-                    model_stats = token_data.get("modelStats", {})
-                    if model not in model_stats:
-                        model_stats[model] = {
-                            "lastCallTime": None,
-                            "requestCount": 0,
-                            "failureCount": 0,
-                            "lastFailureTime": None,
-                            "lastFailureResponse": None
-                        }
-
-                    model_stats[model]["lastCallTime"] = int(time.time() * 1000)
-                    model_stats[model]["requestCount"] += 1
-
-                    self._save_token_status()
-                except Exception as e:
-                    print(f"Failed to update model stats: {e}")
 
                 return token_string
 
@@ -2004,7 +2002,7 @@ class ThreadSafeTokenManager:
             return None
 
     def remove_token_from_model(self, model: str, token_string: str) -> bool:
-        """Remove specific token from model."""
+        """从模型移除指定 token。"""
         with self._lock:
             normalized_model = self._normalize_model_name(model)
 
@@ -2031,11 +2029,11 @@ class ThreadSafeTokenManager:
             return False
 
     def get_token_count_for_model(self, model: str) -> int:
-        """Get available token count for model using quota-based validation."""
+        """按配额规则统计该模型可用的 token 数量。"""
         with self._lock:
             count = 0
 
-            # Determine required tokens for this model (use original model name)
+            # 计算所需配额（按原始模型名判断 expert/imageGen）
             if model.endswith(("-expert", "-imageGen")):
                 required_tokens = 4
             else:
@@ -2045,11 +2043,11 @@ class ThreadSafeTokenManager:
                 if not isinstance(token_data, dict):
                     continue
 
-                # Check if token is valid and not expired
+                # 检查是否有效且未过期
                 if token_data.get("isExpired", False) or not token_data.get("isValid", True):
                     continue
 
-                # Check quota availability
+                # 检查配额是否充足
                 quota_data = token_data.get("quota", {})
                 remaining_tokens = quota_data.get("remainingTokens", 0)
 
@@ -2059,14 +2057,10 @@ class ThreadSafeTokenManager:
             return count
 
     def rotate_token(self, model: str, token_string: str) -> None:
-        """Mark a token as having issues for this model (quota-based system).
-
-        Used after receiving a 429 to discourage using this token temporarily.
-        In the new quota system, we record this as a failure statistic.
-        """
+        """在配额制下标记该 token 出现问题（收到 429 时使用，作为失败统计）。"""
         with self._lock:
             try:
-                # Extract SSO value from token string
+                # 从 token 字符串中提取 SSO 值
                 if "sso=" in token_string:
                     sso_value = token_string.split("sso=")[1].split(";")[0]
                 else:
@@ -2078,7 +2072,7 @@ class ThreadSafeTokenManager:
 
                 token_data = self._token_status[sso_value]
 
-                # Add to model stats as a soft failure (rate limit) - use original model name
+                # 作为软失败（限流）记入模型统计，使用原始模型名
                 model_stats = token_data.get("modelStats", {})
                 if model not in model_stats:
                     model_stats[model] = {
@@ -2100,7 +2094,7 @@ class ThreadSafeTokenManager:
                 print(f"Failed to rotate token: {e}")
 
     def get_remaining_capacity(self) -> Dict[str, int]:
-        """Get remaining request capacity for each model."""
+        """获取每个模型的剩余请求容量。"""
         with self._lock:
             capacity_map = {}
 
@@ -2111,15 +2105,16 @@ class ThreadSafeTokenManager:
 
             return capacity_map
 
-    # --- Quota reset helpers for manager ---
+    # --- 管理端：配额重置辅助 ---
     def reset_token_quota(
         self, sso_value: str, remaining: Optional[int] = None, total: Optional[int] = None
     ) -> bool:
-        """Reset quota for a single token and persist to file.
+        """重置单个 token 的配额并持久化。
 
-        If `remaining` is None, it resets to `total` (or existing total, or 80).
-        If `total` is None, keep existing total (or 80).
-        Also resets isExpired and isValid status.
+        说明：
+        - remaining 省略时重置为 total（或原有 total，默认 80）；
+        - total 省略时保留原有 total（默认 80）；
+        - 同时重置 isExpired 与 isValid 状态。
         """
         try:
             with self._lock:
@@ -2172,7 +2167,7 @@ class ThreadSafeTokenManager:
     def reset_all_quotas(
         self, remaining: Optional[int] = None, total: Optional[int] = None
     ) -> int:
-        """Reset quotas for all tokens. Returns number of tokens updated."""
+        """重置所有 token 的配额，返回更新数量。"""
         try:
             updated = 0
             with self._lock:
@@ -2231,7 +2226,7 @@ class ThreadSafeTokenManager:
             return 0
 
     def reduce_token_request_count(self, model: str, count: int) -> bool:
-        """Reduce token request count (for error recovery)."""
+        """减少 token 的请求计数（用于错误恢复）。"""
         with self._lock:
             normalized_model = self._normalize_model_name(model)
 
@@ -2266,37 +2261,109 @@ class ThreadSafeTokenManager:
             return True
 
     def _start_reset_timer(self) -> None:
-        """Start a simple cleanup timer for expired tokens."""
+        """启动两个定时器：1) 清理过期token  2) 每日重置配额。"""
 
         def cleanup_expired():
             while True:
                 try:
-                    # Simple cleanup every hour
+                    # 每小时进行一次简单清理
                     time.sleep(3600)
 
                     with self._lock:
-                        # Clean up expired tokens list periodically
+                        # 定期清理过期 token 列表
                         current_time = int(time.time() * 1000)
-                        # Keep only recent expired tokens (last 24 hours)
+                        # 仅保留最近 24 小时内的过期 token
                         one_day_ms = 24 * 60 * 60 * 1000
                         self._expiredTokens = [
                             token_info for token_info in self._expiredTokens
                             if current_time - token_info[2] < one_day_ms
                         ]
 
-                        # The quota-based system handles token validity automatically
-                        # No need for complex model-based resets anymore
+                        # 配额制会自动处理 token 的可用性
+                        # 无需再进行复杂的按模型重置
                         self._save_token_status()
 
                 except Exception as e:
                     print(f"Error in cleanup timer: {e}")
 
-        timer_thread = threading.Thread(target=cleanup_expired, daemon=True)
-        timer_thread.start()
+        def daily_quota_reset():
+            """每日美国时间凌晨重置所有 token 的配额和状态。"""
+            last_reset_date = None
+            
+            while True:
+                try:
+                    # 获取美国东部时间（ET）
+                    us_tz = pytz.timezone('America/New_York')
+                    now_us = datetime.now(us_tz)
+                    
+                    current_date = now_us.date()
+                    
+                    # 检查是否是新的一天且当前时间在凌晨 0:00-1:00 之间
+                    if (last_reset_date != current_date and 
+                        now_us.hour == 0):
+                        
+                        print(f"[Daily Reset] 开始执行每日配额重置 (美国时间: {now_us.strftime('%Y-%m-%d %H:%M:%S')})")
+                        
+                        with self._lock:
+                            reset_count = 0
+                            skipped_count = 0
+                            for sso_value, token_data in self._token_status.items():
+                                if not isinstance(token_data, dict):
+                                    continue
+                                
+                                # 跳过已标记为过期的 token
+                                if token_data.get("isExpired", False):
+                                    skipped_count += 1
+                                    continue
+                                
+                                # 重置配额为 80
+                                token_data["quota"] = {
+                                    "windowSizeSeconds": None,
+                                    "totalTokens": 80,
+                                    "remainingTokens": 80,
+                                    "updatedAt": int(time.time() * 1000),
+                                }
+                                
+                                # 重置计数
+                                token_data["counts"] = {
+                                    "fast": 80,
+                                    "expert": 20,
+                                    "imageGen": 20,
+                                }
+                                
+                                # 重置有效状态（不修改 isExpired，因为已经在上面检查过了）
+                                token_data["isValid"] = True
+                                
+                                reset_count += 1
+                            
+                            # 保存状态
+                            self._save_token_status()
+                            
+                            print(f"[Daily Reset] 成功重置 {reset_count} 个 token 的配额，跳过 {skipped_count} 个已过期的 token")
+                            last_reset_date = current_date
+                    
+                    # 每 30 分钟检查一次
+                    time.sleep(1800)
+                    
+                except Exception as e:
+                    print(f"[Daily Reset] 每日重置出错: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    time.sleep(1800)  # 出错后等待 30 分钟再试
+
+        # 启动清理定时器
+        cleanup_thread = threading.Thread(target=cleanup_expired, daemon=True)
+        cleanup_thread.start()
+        
+        # 启动每日重置定时器
+        reset_thread = threading.Thread(target=daily_quota_reset, daemon=True)
+        reset_thread.start()
+        
         self._reset_timer_started = True
+        print("[Timer] 已启动定时器：1) 每小时清理过期token  2) 每日美国时间凌晨重置配额")
 
     def delete_token(self, token_string: str) -> bool:
-        """Delete token completely from the system."""
+        """从系统中彻底删除 token。"""
         with self._lock:
             try:
                 removed = False
@@ -2334,7 +2401,7 @@ class ThreadSafeTokenManager:
                 return False
 
     def get_all_tokens(self) -> List[str]:
-        """Get all token strings in the system."""
+        """获取系统中的全部 token 字符串。"""
         with self._lock:
             all_tokens = set()
             for tokens in self._token_storage.values():
@@ -2343,12 +2410,12 @@ class ThreadSafeTokenManager:
             return list(all_tokens)
 
     def get_token_status_map(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
-        """Get complete token status mapping."""
+        """获取完整的 token 状态映射。"""
         with self._lock:
             return dict(self._token_status)
 
     def get_token_health_summary(self) -> Dict[str, Any]:
-        """Get summary of token health across all models with enhanced quota-based logic."""
+        """按配额逻辑汇总各模型的 token 健康状态。"""
         with self._lock:
             summary = {
                 "total_tokens": 0,
@@ -2367,7 +2434,7 @@ class ThreadSafeTokenManager:
             for sso_value, token_data in self._token_status.items():
                 unique_tokens.add(sso_value)
 
-                # Ensure we're working with a valid dict structure
+                # 确保结构为有效的字典
                 if not isinstance(token_data, dict):
                     print(f"Invalid token data structure for health summary: {sso_value}")
                     continue
@@ -2378,14 +2445,14 @@ class ThreadSafeTokenManager:
                 hasFailures = False
                 totalTokenFailures = 0
 
-                # Check quota status
+                # 检查配额状态
                 quota_data = token_data.get("quota", {})
                 if isinstance(quota_data, dict):
                     remaining_tokens = quota_data.get("remainingTokens", 0)
                     if remaining_tokens < 4:  # 少于4积分无法使用专家模式
                         isLowQuota = True
 
-                # Check model statistics for failures
+                # 检查模型失败统计
                 model_stats = token_data.get("modelStats", {})
                 if isinstance(model_stats, dict):
                     for model, stats in model_stats.items():
@@ -2395,7 +2462,7 @@ class ThreadSafeTokenManager:
                                 hasFailures = True
                                 totalTokenFailures += failure_count
 
-                            # Add to byModel summary
+                            # 汇总到 byModel 统计
                             if model not in summary["byModel"]:
                                 summary["byModel"][model] = {
                                     "total": 0,
@@ -2448,9 +2515,9 @@ class ThreadSafeTokenManager:
 
             return summary
 
-    # --- New quota-based accounting (points system) ---
+    # --- 新的配额记账（积分制） ---
     def _ensure_token_bucket(self, sso_value: str) -> None:
-        """Ensure token key exists in status map."""
+        """确保状态映射中存在该 token 的存储桶。"""
         if sso_value not in self._token_status:
             self._token_status[sso_value] = {}
 
@@ -2461,28 +2528,32 @@ class ThreadSafeTokenManager:
         total_tokens: int,
         window_size_seconds: Optional[int] = None,
     ) -> None:
-        """Update per-token shared quota and derived category counts.
+        """更新 token 的共享配额与派生计数。
 
-        - remaining_tokens: authoritative remaining points from upstream
-        - total_tokens: total points capacity (default 80 if unknown)
-        - window_size_seconds: upstream window (optional)
+        - remaining_tokens：上游权威的剩余积分
+        - total_tokens：总积分（未知时默认 80）
+        - window_size_seconds：上游窗口（可选）
 
-        Updates quota fields:
-        - quota.remainingTokens: 剩余积分
-        - quota.totalTokens: 总积分
-        - counts: 各模式可用次数的快捷访问
+        更新字段：
+        - quota.remainingTokens：剩余积分
+        - quota.totalTokens：总积分
+        - counts：各模式可用次数（便于快速访问）
         """
         try:
+            print(f"update_token_quota called with: remaining={remaining_tokens}, total={total_tokens}, window={window_size_seconds}")
             with self._lock:
                 credential = TokenCredential(token_string, TokenType.NORMAL)
                 sso_value = credential.extract_sso_value()
+                print(f"Updating token quota for sso: {sso_value[:20]}...")
                 self._ensure_token_bucket(sso_value)
 
                 if sso_value not in self._token_status:
+                    print(f"Token {sso_value[:20]}... not found in token_status")
                     return False
 
                 models_data = self._token_status[sso_value]
                 quota = models_data.get("quota", {})
+                print(f"Current quota before update: {quota}")
                 cur_total = int(quota.get("totalTokens", 80) or 80)
                 new_total = int(total_tokens) if total_tokens is not None else cur_total
                 new_remaining = (
@@ -2524,14 +2595,14 @@ class ThreadSafeTokenManager:
         success: bool = True,
         error_response: Optional[str] = None
     ) -> None:
-        """Record model usage statistics with camelCase naming.
+        """记录模型使用统计（字段使用 camelCase）。
 
-        Records:
-        - lastCallTime: 最后一次调用时间
-        - requestCount: 请求次数
-        - failureCount: 失败次数
-        - lastFailureTime: 最后一次失败时间
-        - lastFailureResponse: 最后一次失败响应
+        记录项：
+        - lastCallTime：最后一次调用时间
+        - requestCount：请求次数
+        - failureCount：失败次数
+        - lastFailureTime：最后一次失败时间
+        - lastFailureResponse：最后一次失败响应
         """
         try:
             with self._lock:
@@ -2584,12 +2655,12 @@ class ThreadSafeTokenManager:
         total_tokens: int,
         window_size_seconds: Optional[int] = None,
     ) -> None:
-        """Update per-token shared quota and derived category counts.
+        """更新 token 的共享配额与派生计数。
 
-        Data structure using camelCase (no underscores):
-        - quota: main quota information
-        - counts: derived usage counts
-        - modelStats: individual model usage statistics
+        数据结构（camelCase）：
+        - quota：配额信息
+        - counts：派生统计
+        - modelStats：各模型的使用统计
         """
         try:
             with self._lock:
@@ -2650,7 +2721,7 @@ class ThreadSafeTokenManager:
 
 @dataclass
 class ImageTypeInfo:
-    """Information about an image type."""
+    """图片类型信息。"""
 
     mime_type: str
     file_name: str
@@ -2658,7 +2729,7 @@ class ImageTypeInfo:
 
 
 class ImageProcessor:
-    """Handles image processing and type detection."""
+    """处理图片与类型识别。"""
 
     IMAGE_SIGNATURES = {
         b"\xff\xd8\xff": ("jpg", "image/jpeg"),
@@ -2669,7 +2740,7 @@ class ImageProcessor:
 
     @classmethod
     def is_base64_image(cls, s: str) -> bool:
-        """Check if string is a valid base64 image by examining binary signatures."""
+        """通过二进制特征判断是否为合法的 base64 图片。"""
         try:
             decoded = base64.b64decode(s, validate=True)
             return any(decoded.startswith(sig) for sig in cls.IMAGE_SIGNATURES)
@@ -2678,7 +2749,7 @@ class ImageProcessor:
 
     @classmethod
     def get_extension_and_mime_from_header(cls, data: bytes) -> tuple:
-        """Detect image format from binary header."""
+        """从二进制头部检测图片格式。"""
         for sig, (ext, mime) in cls.IMAGE_SIGNATURES.items():
             if data.startswith(sig):
                 return ext, mime
@@ -2686,7 +2757,7 @@ class ImageProcessor:
 
     @classmethod
     def get_image_type_info(cls, base64_string: str) -> ImageTypeInfo:
-        """Enhanced image type detection with binary signature support."""
+        """基于二进制签名增强的图片类型识别。"""
         mime_type = "image/jpeg"
         extension = "jpg"
 
@@ -2711,17 +2782,17 @@ class ImageProcessor:
 
 
 class FileUploadManager:
-    """Handles file and image upload operations."""
+    """负责文件/图片上传。"""
 
     def __init__(
         self, config: ConfigurationManager, token_manager: ThreadSafeTokenManager
     ):
-        """Initialize file upload manager."""
+        """初始化上传管理器。"""
         self.config = config
         self.token_manager = token_manager
 
     def upload_text_file(self, content: str, model: str) -> str:
-        """Upload text content as a file attachment."""
+        """将文本内容作为附件上传。"""
         try:
             content_base64 = base64.b64encode(content.encode("utf-8")).decode("utf-8")
             upload_data = {
@@ -2737,9 +2808,9 @@ class FileUploadManager:
                 raise TokenException(f"No available tokens for model: {model}")
 
             cf_clearance = self.config.get("SERVER.CF_CLEARANCE", "")
-            cookie = f"{auth_token};{cf_clearance}" if cf_clearance else auth_token
+            cookie = build_cookie(auth_token, cf_clearance)
 
-            # Prefer static PROXY; otherwise dynamic proxy if available
+            # 优先使用静态 PROXY；否则在可用时使用动态代理
             dynamic_api = self.config.get("API.DYNAMIC_PROXY_API")
             proxy_url = self.config.get("API.PROXY")
             if not proxy_url and dynamic_api:
@@ -2822,7 +2893,7 @@ class FileUploadManager:
             ) from error
 
     def upload_image(self, image_data: str, model: str) -> str:
-        """Upload image with enhanced format support."""
+        """上传图片（支持增强的格式识别）。"""
         try:
             if "data:image" in image_data:
                 image_buffer = image_data.split(",")[1]
@@ -2844,9 +2915,9 @@ class FileUploadManager:
                 raise TokenException(f"No available tokens for model: {model}")
 
             cf_clearance = self.config.get("SERVER.CF_CLEARANCE", "")
-            cookie = f"{auth_token};{cf_clearance}" if cf_clearance else auth_token
+            cookie = build_cookie(auth_token, cf_clearance)
 
-            # Prefer static PROXY; otherwise dynamic proxy if available
+            # 优先使用静态 PROXY；否则在可用时使用动态代理
             dynamic_api = self.config.get("API.DYNAMIC_PROXY_API")
             proxy_url = self.config.get("API.PROXY")
             if not proxy_url and dynamic_api:
@@ -2927,7 +2998,7 @@ class FileUploadManager:
 
 @dataclass
 class ProcessedMessage:
-    """Result of message processing."""
+    """消息处理结果。"""
 
     content: str
     file_attachments: List[str]
@@ -2936,20 +3007,20 @@ class ProcessedMessage:
 
 
 class MessageContentProcessor:
-    """Processes message content and handles complex formats."""
+    """处理消息内容并支持复杂格式。"""
 
     def __init__(self, file_upload_manager: FileUploadManager):
-        """Initialize message processor."""
+        """初始化消息处理器。"""
         self.file_upload_manager = file_upload_manager
 
     def remove_think_tags_and_images(self, text: str) -> str:
-        """Remove think tags and base64 images from text."""
+        """移除 <think> 标签与 base64 图片占位。"""
         text = re.sub(r"<think>[\s\S]*?<\/think>", "", text).strip()
         text = re.sub(r"!\[image\]\(data:.*?base64,.*?\)", "[图片]", text)
         return text
 
     def process_content_item(self, content_item: Any) -> str:
-        """Process individual content item (text or image)."""
+        """处理单个内容项（文本或图片）。"""
         if isinstance(content_item, list):
             text_parts = []
             for item in content_item:
@@ -2974,7 +3045,7 @@ class MessageContentProcessor:
         return ""
 
     def extract_image_attachments(self, content_item: Any, model: str) -> List[str]:
-        """Extract and upload image attachments from content."""
+        """提取并上传图片附件。"""
         attachments = []
 
         if isinstance(content_item, list):
@@ -3000,7 +3071,7 @@ class MessageContentProcessor:
     def process_messages(
         self, messages: List[Dict[str, Any]], model: str
     ) -> ProcessedMessage:
-        """Process list of messages into a single formatted string."""
+        """将多条消息整理为一个格式化字符串。"""
         formatted_messages = ""
         all_file_attachments = []
         message_length = 0
@@ -3075,7 +3146,7 @@ class MessageContentProcessor:
 
 @dataclass
 class ChatRequestConfig:
-    """Configuration for chat request."""
+    """聊天请求配置。"""
 
     model_name: str
     message: str
@@ -3088,12 +3159,12 @@ class ChatRequestConfig:
 
 
 class GrokApiClient:
-    """Clean, focused Grok API client with separated concerns."""
+    """职责清晰的 Grok API 客户端。"""
 
     def __init__(
         self, config: ConfigurationManager, token_manager: ThreadSafeTokenManager
     ):
-        """Initialize Grok API client."""
+        """初始化客户端。"""
         self.config = config
         self.token_manager = token_manager
         self.file_upload_manager = FileUploadManager(config, token_manager)
@@ -3102,16 +3173,16 @@ class GrokApiClient:
     def validate_model_and_request(
         self, model: str, request_data: Dict[str, Any]
     ) -> str:
-        """Validate model and request parameters."""
+        """校验模型与请求参数。"""
         if model not in self.config.models:
             raise ValidationException(f"Unsupported model: {model}")
 
         return self.config.models[model]
 
     def determine_search_and_generation_settings(self, model: str) -> tuple:
-        """Determine search and generation settings based on model."""
-        # Only grok-3-search enables web search
-        enable_search = model in ["grok-3-search"]
+        """依据模型确定搜索/生成功能开关。"""
+        # 仅 grok-3-search 打开网页搜索
+        enable_search = model not in ["grok-3", "grok-4-imageGen", "grok-3-imageGen"]
         enable_image_generation = model in ["grok-4-imageGen", "grok-3-imageGen"]
 
         return (enable_search, enable_image_generation)
@@ -3119,7 +3190,7 @@ class GrokApiClient:
     def validate_message_requirements(
         self, model: str, messages: List[Dict[str, Any]]
     ) -> None:
-        """Validate message requirements for specific models."""
+        """校验特定模型的消息要求。"""
         if model in ["grok-4-imageGen", "grok-3-imageGen"]:
             if not messages:
                 raise ValidationException("Messages cannot be empty")
@@ -3131,7 +3202,7 @@ class GrokApiClient:
                 )
 
     def prepare_chat_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Prepare chat request with clean separation of concerns."""
+        """准备聊天请求（职责分离）。"""
         try:
             model = str(request_data.get("model"))
             messages = request_data.get("messages", [])
@@ -3145,10 +3216,10 @@ class GrokApiClient:
                 enable_image_generation,
             ) = self.determine_search_and_generation_settings(model)
 
-            # Expert mode only when requested model ends with -expert
+            # 仅当模型名以 -expert 结尾时启用专家模式
             expert_mode = model.endswith("-expert")
 
-            # Extract system messages into customPersonality and remove them from the main message flow
+            # 将 system 消息提取为 customPersonality，并从对话消息中移除
             system_parts: List[str] = []
             messages_no_system: List[Dict[str, Any]] = []
             for msg in messages:
@@ -3186,7 +3257,7 @@ class GrokApiClient:
             raise
 
     def build_request_payload(self, config: ChatRequestConfig) -> Dict[str, Any]:
-        """Build the final request payload."""
+        """构建最终请求负载。"""
 
         model_mode = "MODEL_MODE_EXPERT" if config.expert_mode else "MODEL_MODE_AUTO"
 
@@ -3196,22 +3267,14 @@ class GrokApiClient:
             "message": config.message,
             "fileAttachments": config.file_attachments,
             "imageAttachments": [],
-            # Reference app always sets disableSearch to False and controls search via toolOverrides
-            "disableSearch": False,
+            "disableSearch": not config.enable_search,
             "enableImageGeneration": config.enable_image_generation,
             "returnImageBytes": False,
             "returnRawGrokInXaiRequest": False,
             "enableImageStreaming": False,
             "imageGenerationCount": 1,
             "forceConcise": False,
-            "toolOverrides": {
-                "imageGen": config.enable_image_generation,
-                "webSearch": config.enable_search,
-                "xSearch": config.enable_search,
-                "xMediaSearch": config.enable_search,
-                "trendsSearch": config.enable_search,
-                "xPostAnalyze": config.enable_search,
-            },
+            "toolOverrides": {},
             "enableSideBySide": True,
             "sendFinalMetadata": True,
             "webpageUrls": [],
@@ -3223,7 +3286,7 @@ class GrokApiClient:
             "isAsyncChat": False,
         }
 
-        # Attach custom personality (system prompt) if provided
+        # 如提供了自定义人格（系统提示），则附加到请求中
         if config.custom_personality:
             payload["customPersonality"] = config.custom_personality
 
@@ -3232,7 +3295,7 @@ class GrokApiClient:
     def make_request(
         self, payload: Dict[str, Any], model: str, stream: bool = False
     ) -> Tuple[requests.Response, str, Optional[str]]:
-        """Make the actual HTTP request to Grok API and return response with used token."""
+        """调用 Grok API 并返回响应，同时返回使用的 token。"""
         auth_token = self.token_manager.get_token_for_model(model)
         if not auth_token:
             token_count = self.token_manager.get_token_count_for_model(model)
@@ -3246,9 +3309,9 @@ class GrokApiClient:
                 )
 
         cf_clearance = self.config.get("SERVER.CF_CLEARANCE", "")
-        cookie = f"{auth_token};{cf_clearance}" if cf_clearance else auth_token
+        cookie = build_cookie(auth_token, cf_clearance)
 
-        # Determine proxy to use: prefer static PROXY if configured; otherwise use dynamic proxy
+        # 选择代理：若配置了静态 PROXY 优先；否则使用动态代理
         dynamic_api = self.config.get("API.DYNAMIC_PROXY_API")
         proxy_url = self.config.get("API.PROXY")
         if not proxy_url and dynamic_api:
@@ -3259,15 +3322,14 @@ class GrokApiClient:
 
         print(f"Making request to Grok API for model: {model}")
 
-        # Execute request; if dynamic proxy is set and we hit a CF challenge/non-network failure,
-        # invalidate current proxy and try again up to PROXY_RETRY_LIMIT
+        # 发起请求：若使用动态代理且遇到 CF 挑战/网络异常，则失效当前代理并在上限内重试
         attempts = 1
         max_attempts = int(self.config.get("API.PROXY_RETRY_LIMIT", 20)) if dynamic_api else 1
 
         last_exc: Optional[Exception] = None
         while attempts <= max_attempts:
             try:
-                # Use longer timeout for streaming to avoid libcurl low-speed aborts on slow upstreams.
+                # 流式请求使用更长超时，避免上游缓慢导致的低速中止
                 request_timeout = self.config.get("API.STREAM_TIMEOUT", 600) if stream else self.config.get("API.REQUEST_TIMEOUT", 120)
                 response = curl_requests.post(
                     f"{self.config.get('API.BASE_URL')}/rest/app-chat/conversations/new",
@@ -3279,7 +3341,7 @@ class GrokApiClient:
                     },
                     data=json.dumps(payload),
                     impersonate="chrome133a",
-                    # Always stream upstream so we can iterate lines even for non-stream outer mode.
+                    # 始终以流式方式请求上游，便于逐行解析（即便外层为非流式模式）
                     stream=True,
                     timeout=request_timeout,
                     **proxy_config,
@@ -3287,7 +3349,7 @@ class GrokApiClient:
 
                 print(f"Response status: {response.status_code}")
 
-                # Header-only CF challenge detection; rotate only when using dynamic (no static PROXY configured)
+                # 仅基于响应头判断 CF 挑战；仅在动态代理（未配置静态 PROXY）时进行代理轮换
                 if dynamic_api and not self.config.get("API.PROXY") and response.status_code in (403, 503):
                     cf_mitigated = response.headers.get("cf-mitigated", "").lower()
                     if cf_mitigated == "challenge":
@@ -3304,7 +3366,7 @@ class GrokApiClient:
                 print(f"HTTP request failed (attempt {attempts}/{max_attempts}): {e}")
                 last_exc = e
                 if dynamic_api and not self.config.get("API.PROXY"):
-                    # Invalidate current proxy and retry
+                    # 使当前代理失效并重试
                     try:
                         proxy_manager.invalidate_current(proxy_url)
                     except Exception:
@@ -3314,12 +3376,12 @@ class GrokApiClient:
                     attempts += 1
                     continue
                 else:
-                    # No dynamic proxy configured; fail fast
+                    # 未配置动态代理：快速失败
                     raise GrokApiException(
                         f"HTTP request failed: {e}", "REQUEST_FAILED"
                     ) from e
 
-        # Exhausted attempts
+        # 尝试次数已耗尽
         raise GrokApiException(
             f"All proxy attempts exhausted ({max_attempts}). Last error: {last_exc}",
             "PROXY_EXHAUSTED",
@@ -3328,7 +3390,7 @@ class GrokApiClient:
 
 @dataclass
 class ProcessingResult:
-    """Result of processing a model response."""
+    """模型响应处理结果。"""
 
     token: Optional[str] = None
     image_url: Optional[str] = None
@@ -3337,16 +3399,16 @@ class ProcessingResult:
 
 
 class ModelResponseProcessor:
-    """Stateless response processor for different model types."""
+    """无状态的响应处理器，适配不同模型类型。"""
 
     def __init__(self, config: ConfigurationManager):
-        """Initialize response processor."""
+        """初始化处理器。"""
         self.config = config
 
     def process_response(
         self, response_data: Dict[str, Any], model: str, current_state: ProcessingState
     ) -> ProcessingResult:
-        """Process model response based on model type and current state."""
+        """按模型类型与当前状态处理响应。"""
         try:
             streaming_image_response = response_data.get(
                 "streamingImageGenerationResponse"
@@ -3386,26 +3448,8 @@ class ModelResponseProcessor:
                     new_state = current_state.with_image_generation(True, 1)
                     return ProcessingResult(image_url=image_url, new_state=new_state)
 
-            if model == "grok-3":
-                return self._process_grok_3_response(response_data, current_state)
-            elif model == "grok-3-search":
-                return self._process_grok_3_search_response(
-                    response_data, current_state
-                )
-            
-            elif model in [
-                "grok-4",
-                "grok-4-fast",
-                "grok-4-expert",
-                "grok-4-fast-expert",
-                "grok-4-mini-thinking-tahoe",
-            ]:
-                return self._process_grok_4_response(response_data, current_state)
-            
-            else:
-                token = response_data.get("token")
-                processed_token = self._transform_artifacts(token) if token else None
-                return ProcessingResult(token=processed_token)
+            # 所有模型统一使用 Grok 的处理方式
+            return self._process_grok_response(response_data, current_state)
 
         except Exception as e:
             print(f"Error processing {model} response: {e}", "ResponseProcessor")
@@ -3413,53 +3457,19 @@ class ModelResponseProcessor:
             processed_token = self._transform_artifacts(token) if token else None
             return ProcessingResult(token=processed_token)
 
-    def _process_grok_3_response(
-        self, response_data: Dict[str, Any], current_state: ProcessingState
-    ) -> ProcessingResult:
-        """Process Grok-3 model response."""
-        token = response_data.get("token")
-        processed_token = self._transform_artifacts(token) if token else None
-        return ProcessingResult(token=processed_token, new_state=current_state)
-
-    def _process_grok_3_search_response(
-        self, response_data: Dict[str, Any], current_state: ProcessingState
-    ) -> ProcessingResult:
-        """Process Grok-3 search model response."""
-        # If we've already closed thinking once, ignore any subsequent webSearchResults
-        if current_state.is_thinking_end:
-            return ProcessingResult(should_skip=True, new_state=current_state)
-
-        if response_data.get("webSearchResults") and self.config.get(
-            "SHOW_SEARCH_RESULTS", True
-        ):
-            search_results = UtilityFunctions.organize_search_results(
-                response_data["webSearchResults"]
-            )
-            token = f"\r\n<think>{search_results}</think>\r\n"
-            processed_token = self._transform_artifacts(token)
-            # Since this path emits a complete <think>...</think> block in one shot,
-            # mark thinking_end so that subsequent think/search content is ignored.
-            return ProcessingResult(
-                token=processed_token,
-                new_state=current_state.with_thinking_end(True),
-            )
-        else:
-            token = response_data.get("token")
-            processed_token = self._transform_artifacts(token) if token else None
-            return ProcessingResult(token=processed_token, new_state=current_state)
-
     
-
-    def _process_grok_4_response(
+    def _process_grok_response(
         self, response_data: Dict[str, Any], current_state: ProcessingState
     ) -> ProcessingResult:
-        """Process Grok-4 model response with simple think rule: isThinking OR has_search => think,
-        and stop honoring further think/search after first closing </think>."""
+        """统一的 Grok 模型响应处理（适用于 grok-3、grok-4 及所有变体）：
+        - 只要 isThinking 为真或携带 webSearchResults，就视为处于 <think> 阶段；
+        - 第一次关闭 </think> 之后，后续的思考/搜索内容一律忽略；
+        - 通过 SHOW_THINKING 配置控制是否展示思考内容。"""
         show_thinking = self.config.get("SHOW_THINKING", False)
         is_thinking = bool(response_data.get("isThinking", False))
         has_search = bool(response_data.get("webSearchResults"))
-
-        # Render search results to Markdown if present
+        
+        # 有搜索结果且允许展示思考时，渲染为 Markdown
         search_md: str = ""
         if has_search and show_thinking:
             try:
@@ -3469,40 +3479,38 @@ class ModelResponseProcessor:
             except Exception:
                 search_md = ""
 
-        # This frame is considered inside <think> if either flag is true
+        # 只要满足任一条件（isThinking 或 has_search）即判定为 <think> 帧
         frame_is_think = is_thinking or has_search
 
-        # If we've already output the first </think>, ignore any further think/search frames
+        # 如果已经输出过第一个 </think>，忽略后续所有思考/搜索帧
         if current_state.is_thinking_end and frame_is_think:
             return ProcessingResult(should_skip=True, new_state=current_state)
 
-        # If SHOW_THINKING is off, skip all think-related output
+        # SHOW_THINKING 关闭时，跳过所有思考相关输出
         if frame_is_think and not show_thinking:
             return ProcessingResult(should_skip=True, new_state=current_state)
 
-        # Build inner content: token text + optional search markdown
+        # 组装正文：token 文本 +（可选）搜索结果
+        # 注意：为保留最终 Markdown 格式，这里不要清洗 token 文本
         token_text = response_data.get("token", "") or ""
-        token_text = UtilityFunctions.clean_markdown(token_text)
         inner = token_text
         if search_md:
             if inner and not inner.endswith("\n"):
                 inner += "\n"
             inner += search_md
 
-        # Open think if needed
+        # 需要时打开 <think>
         if frame_is_think and not current_state.is_thinking:
             out = "<think>" + inner
             processed = self._transform_artifacts(out)
             return ProcessingResult(token=processed, new_state=current_state.with_thinking(True))
 
-        # Stay inside think and stream inner content
+        # 处于 <think> 中，直接追加内容
         if frame_is_think and current_state.is_thinking:
             processed = self._transform_artifacts(inner)
             return ProcessingResult(token=processed, new_state=current_state)
 
-        # Close think when we leave a think frame, unless this is an empty-token bridge
-        # between thinking and upcoming search/results frames. Empty-token frames should
-        # not break the think block; keep state and skip output.
+        # 离开 <think> 时关闭；若本分片内容为空则仅保持状态，不输出
         if (not frame_is_think) and current_state.is_thinking:
             if (token_text or "") == "":
                 return ProcessingResult(should_skip=True, new_state=current_state)
@@ -3513,14 +3521,14 @@ class ModelResponseProcessor:
                 new_state=current_state.with_thinking(False).with_thinking_end(True),
             )
 
-        # Otherwise passthrough
+        # 其他情况：直接透传当前 token
         processed = self._transform_artifacts(token_text) if token_text else None
         return ProcessingResult(token=processed, new_state=current_state)
 
     
 
     def _transform_artifacts(self, text: Any) -> str:
-        """Artifact transformation now handled at streaming level - return unchanged."""
+        """构件转换在流式层处理；此处原样返回。"""
         if not text:
             return ""
 
@@ -3528,10 +3536,10 @@ class ModelResponseProcessor:
 
 
 class ResponseImageHandler:
-    """Handles image responses with memory caching and OpenAI-compatible format."""
+    """处理图像响应：不做缓存，输出为 OpenAI 兼容格式。"""
 
     def __init__(self, config: ConfigurationManager):
-        """Initialize image handler with memory cache."""
+        """初始化图像处理器。"""
         self.config = config
         self._cache = {}
         self._cache_lock = threading.Lock()
@@ -3539,14 +3547,14 @@ class ResponseImageHandler:
         self.cache_access_order = []
 
     def handle_image_response(self, image_url: str, cookie: Optional[str] = None, proxy_url: Optional[str] = None) -> str:
-        """Process image response and return OpenAI-compatible format without caching.
+        """处理图片响应并返回 OpenAI 兼容的格式（不使用缓存）。
 
-        Follows reference app behavior:
-        - Use static proxy configuration only (no dynamic rotation) to avoid excessive proxy refreshes.
-        - Include Cookie if provided to authorize asset access.
-        - Retry up to 2 times before failing.
+        与参考应用保持一致：
+        - 仅使用静态代理（不做动态轮换），避免过度刷新；
+        - 若提供 Cookie，用于授权访问资源；
+        - 失败前最多重试 2 次。
         """
-        # Cache disabled: always fetch fresh (no cache lookups)
+        # 关闭缓存：始终按需拉取（不查缓存）
 
         max_retries = 2
         retry_count = 0
@@ -3597,7 +3605,7 @@ class ResponseImageHandler:
 
         image_md = f"![image]({data_url})"
 
-        # Cache disabled: do not store results; return directly
+        # 关闭缓存：不存储结果，直接返回
         return image_md
 
 
@@ -3605,7 +3613,7 @@ from enum import Enum
 
 
 class FilterState(Enum):
-    """States for the streaming tag filter state machine."""
+    """流式标签过滤状态机的状态。"""
 
     NORMAL = "normal"
     POTENTIAL_TAG = "potential_tag"
@@ -3616,14 +3624,14 @@ class FilterState(Enum):
 
 
 class TagBehavior(Enum):
-    """Behavior types for filtered tags."""
+    """被过滤标签的处理行为。"""
 
     PRESERVE_CONTENT = "preserve_content"
     REMOVE_ALL = "remove_all"
 
 
 class StreamingTagFilter:
-    """High-performance state machine-based streaming filter with minimal buffering and per-stream independence."""
+    """高性能的状态机流式过滤器：最小缓冲、各流互不影响。"""
 
     def __init__(
         self,
@@ -3631,15 +3639,11 @@ class StreamingTagFilter:
         content_type_mappings: Dict[str, Dict[str, str]] = {},
     ):
         """
-        Initialize filter with configurable tag behaviors and contentType mappings.
+        使用可配置的标签行为与 contentType 映射初始化过滤器。
 
-        Args:
-            tag_config: Dict mapping tag names to their behavior configuration
-                       e.g., {
-                           "xaiartifact": {"behavior": "preserve_content"},
-                           "grok:render": {"behavior": "remove_all"}
-                       }
-            content_type_mappings: Dict mapping contentTypes to replacement tags
+        参数：
+          - tag_config：标签到行为的映射（如 xaiartifact→保留内容，grok:render→移除）
+          - content_type_mappings：contentType 与代码块包裹符的映射
         """
         self.tag_config = {}
         default_config = tag_config or {
@@ -3684,16 +3688,16 @@ class StreamingTagFilter:
         self.reset_state()
 
     def _get_tag_behavior(self, tag_name: str) -> Optional[TagBehavior]:
-        """Get the configured behavior for a tag."""
+        """读取标签的处理行为。"""
         config = self.tag_config.get(tag_name.lower())
         return config["behavior"] if config else None
 
     def _is_filtered_tag(self, tag_name: str) -> bool:
-        """Check if a tag is configured for filtering."""
+        """判断标签是否在过滤名单中。"""
         return tag_name.lower() in self.tag_config
 
     def reset_state(self):
-        """Reset the filter state (useful for reusing filter instances)."""
+        """重置过滤器状态（便于复用实例）。"""
         self.state = FilterState.NORMAL
         self.buffer = ""
         self.tag_stack = []
@@ -3704,7 +3708,7 @@ class StreamingTagFilter:
         self.last_char_was_lt = False
 
     def _quick_scan_for_filtered_content(self, text: str) -> bool:
-        """Quick scan to see if text potentially contains filtered content."""
+        """快速扫描文本中是否包含待过滤内容。"""
         if not text or "<" not in text:
             return False
 
@@ -3720,7 +3724,7 @@ class StreamingTagFilter:
         return False
 
     def _extract_tag_name_quick(self, tag_content: str) -> str:
-        """Quick tag name extraction for performance."""
+        """快速提取标签名（性能优化）。"""
         if not tag_content:
             return ""
 
@@ -3734,7 +3738,7 @@ class StreamingTagFilter:
         return parts[0].lower() if parts else ""
 
     def _extract_content_type(self, tag_content: str) -> Optional[str]:
-        """Extract contentType attribute from tag."""
+        """从标签文本中提取 contentType 属性。"""
         match = re.search(
             r'contentType=["\']([^"\'>]+)["\']', tag_content, re.IGNORECASE
         )
@@ -3743,18 +3747,18 @@ class StreamingTagFilter:
     def _should_preserve_content(
         self, tag_name: str, content_type: Optional[str]
     ) -> bool:
-        """Check if tag content should be preserved with replacement."""
+        """是否应保留内容（并替换包裹）。"""
         behavior = self._get_tag_behavior(tag_name)
         return behavior == TagBehavior.PRESERVE_CONTENT
 
     def _get_content_replacement(self, content_type: Optional[str]) -> Dict[str, str]:
-        """Get replacement mapping for content type, with fallback to plain text."""
+        """按 contentType 获取替换映射，默认返回纯文本包裹。"""
         if content_type and content_type in self.content_type_mappings:
             return self.content_type_mappings[content_type]
         return {"stag": "", "etag": ""}
 
     def _process_complete_tag(self, tag_text: str) -> str:
-        """Process a complete tag and return appropriate output."""
+        """处理完整标签并返回应输出文本。"""
         if not tag_text.startswith("<") or not tag_text.endswith(">"):
             return tag_text
 
@@ -3821,7 +3825,7 @@ class StreamingTagFilter:
             return ""
 
     def _might_be_closing_tag(self, tag_text: str) -> bool:
-        """Check if the tag might be a closing tag for any tag in our stack."""
+        """是否可能是栈中某个标签的关闭标记。"""
         if not tag_text.startswith("</"):
             return False
 
@@ -3834,27 +3838,25 @@ class StreamingTagFilter:
         return False
 
     def _is_in_removal_context(self) -> bool:
-        """Check if we're currently in a removal context.
-        ANY REMOVE_ALL tag in the stack means we're in removal context."""
+        """是否处于“移除”上下文（栈中存在 REMOVE_ALL 即为真）。"""
         for tag_entry in self.tag_stack:
             if tag_entry.get("behavior") == TagBehavior.REMOVE_ALL:
                 return True
         return False
 
     def _is_in_preserved_context(self) -> bool:
-        """Check if we're currently in a content-preserving context.
-        The most recent (top of stack) tag's behavior takes precedence."""
+        """是否处于“保留内容”上下文（以栈顶行为为准）。"""
         if not self.tag_stack:
             return False
         top_tag = self.tag_stack[-1]
         return top_tag.get("preserve_content", False)
 
     def _is_in_filtered_context(self) -> bool:
-        """Check if we're currently in any filtered context."""
+        """是否处于任意过滤上下文。"""
         return len(self.tag_stack) > 0
 
     def _should_output_char(self, char: str) -> bool:
-        """Determine if a character should be output based on current context."""
+        """根据当前上下文判断是否输出该字符。"""
         if not self._is_in_filtered_context():
             return True
         if self._is_in_removal_context():
@@ -3862,7 +3864,7 @@ class StreamingTagFilter:
         return self._is_in_preserved_context()
 
     def filter_chunk(self, chunk: str) -> str:
-        """Filter chunk with minimal buffering and maximum streaming efficiency."""
+        """以最小缓冲、最高效率过滤文本分片。"""
         if not chunk:
             return ""
 
@@ -3937,7 +3939,7 @@ class StreamingTagFilter:
         return result
 
     def finalize(self) -> str:
-        """Finalize the stream and return any remaining content."""
+        """收尾并返回剩余内容。"""
         result = ""
 
         if self.buffer:
@@ -3972,30 +3974,37 @@ class StreamingTagFilter:
 
 @dataclass
 class StreamingContext:
-    """Context for streaming response processing."""
+    """流式响应处理上下文。"""
 
     model: str
     processor: ModelResponseProcessor
     image_handler: ResponseImageHandler
     tag_filter: StreamingTagFilter
     state: ProcessingState = field(default_factory=ProcessingState)
-    # Cookie to access assets (constructed from used token + cf_clearance)
+    # 访问资源用的 Cookie（由 token + cf_clearance 组合）
     cookie: Optional[str] = None
     proxy_url: Optional[str] = None
 
 
 class StreamProcessor:
-    """Handles streaming response processing."""
+    """处理流式响应。"""
 
     @staticmethod
     def process_non_stream_response(
         response: requests.Response, context: StreamingContext
     ) -> Union[str, Dict[str, Any]]:
-        """Process non-streaming response and return complete content including <think> tags."""
-        print("Processing non-streaming response")
+        """处理非流式响应，支持两种格式：
+        
+        1. <think>标签格式：返回包含标签的完整文本字符串
+        2. reasoning_content格式：返回分离reasoning和content的字典
+        """
+        
 
         full_response = ""
+        reasoning_content = ""
         current_state = context.state
+        use_reasoning_format = context.processor.config.get("USE_REASONING_FORMAT", False)
+        in_think = False
 
         try:
             for chunk in response.iter_lines():
@@ -4028,15 +4037,30 @@ class StreamProcessor:
                     if result.token:
                         filtered_token = context.tag_filter.filter_chunk(result.token)
                         if filtered_token:
-                            full_response += filtered_token
+                            if use_reasoning_format:
+                                # reasoning 格式：分离思考和内容
+                                parts = re.split(r'(<think>|</think>)', filtered_token)
+                                for part in parts:
+                                    if part == "<think>":
+                                        in_think = True
+                                    elif part == "</think>":
+                                        in_think = False
+                                    elif part:
+                                        if in_think:
+                                            reasoning_content += part
+                                        else:
+                                            full_response += part
+                            else:
+                                # <think> 标签格式：直接追加
+                                full_response += filtered_token
 
                     if result.image_url:
                         image_content = context.image_handler.handle_image_response(
                             result.image_url, context.cookie, context.proxy_url
                         )
-                        # For non-stream response, append the image content directly to the response
+                        # 非流式：将图片内容直接追加到响应
                         full_response += image_content
-                        # For non-imageGen models, ignore image urls to avoid unintended image fetching
+                        # 非 imageGen 模型忽略图片 URL，避免意外拉取
                         continue
 
                 except json.JSONDecodeError:
@@ -4047,9 +4071,63 @@ class StreamProcessor:
 
             final_content = context.tag_filter.finalize()
             if final_content:
-                full_response += final_content
+                if use_reasoning_format:
+                    # 处理 finalize 的内容
+                    parts = re.split(r'(<think>|</think>)', final_content)
+                    for part in parts:
+                        if part == "<think>":
+                            in_think = True
+                        elif part == "</think>":
+                            in_think = False
+                        elif part:
+                            if in_think:
+                                reasoning_content += part
+                            else:
+                                full_response += part
+                else:
+                    full_response += final_content
 
-            return full_response
+            # 最后清理：移除可能残留的标签（非流式处理的兜底方案）
+            # 这些标签可能因为跨块而没有被完全过滤，使用配置中的标签列表
+            tag_config = context.tag_filter.tag_config
+            for tag_name, tag_settings in tag_config.items():
+                if tag_settings.get("behavior") == "remove_all":
+                    escaped_tag = re.escape(tag_name)
+                    # 处理三种情况：
+                    # 1. 成对标签：<tag>...</tag>
+                    # 2. 自闭合标签：<tag ... />
+                    # 3. 单独标签：<tag ...>
+                    patterns = [
+                        rf'<{escaped_tag}[^>]*>.*?</{escaped_tag}>',  # 成对标签
+                        rf'<{escaped_tag}[^>]*/\s*>',                  # 自闭合标签
+                        rf'<{escaped_tag}[^>]*>',                      # 单独开始标签
+                    ]
+                    for pattern in patterns:
+                        full_response = re.sub(pattern, '', full_response, flags=re.DOTALL | re.IGNORECASE)
+                        if use_reasoning_format:
+                            reasoning_content = re.sub(pattern, '', reasoning_content, flags=re.DOTALL | re.IGNORECASE)
+            
+            # 额外清理：移除 <argument> 标签（Grok 内部标签，通常与 grok:render 一起出现）
+            argument_patterns = [
+                r'<argument[^>]*>.*?</argument>',  # 成对的 argument 标签
+                r'<argument[^>]*/\s*>',            # 自闭合 argument 标签
+                r'<argument[^>]*>',                # 单独 argument 标签
+            ]
+            for pattern in argument_patterns:
+                full_response = re.sub(pattern, '', full_response, flags=re.DOTALL | re.IGNORECASE)
+                if use_reasoning_format:
+                    reasoning_content = re.sub(pattern, '', reasoning_content, flags=re.DOTALL | re.IGNORECASE)
+
+            # 返回格式
+            if use_reasoning_format and reasoning_content:
+                # 返回分离的字典格式
+                return {
+                    "content": full_response,
+                    "reasoning_content": reasoning_content
+                }
+            else:
+                # 返回普通字符串
+                return full_response
 
         except Exception as e:
             print(f"Non-stream processing failed: {e}")
@@ -4059,16 +4137,18 @@ class StreamProcessor:
     def process_stream_response(
         response: requests.Response, context: StreamingContext
     ):
-        """Process streaming response and yield formatted chunks with <think> tags.
-
-        - Emit `<think>` and `</think>` as standalone chunks to avoid boundary mis-parsing.
-        - Inside think blocks, stream per-character for smoother character-by-character output.
+        """处理流式响应，支持两种格式：
+        
+        1. <think>标签格式（默认）：保留 <think>...</think> 标签
+        2. reasoning_content格式（USE_REASONING_FORMAT=true）：分离推理和内容到不同字段
         """
-        print("Processing streaming response")
+        
 
         current_state = context.state
         show_thinking = context.processor.config.get("SHOW_THINKING", False)
+        use_reasoning_format = context.processor.config.get("USE_REASONING_FORMAT", False)
         in_think = False
+        reasoning_buffer = []  # 用于收集推理内容
 
         try:
             for chunk in response.iter_lines():
@@ -4113,31 +4193,54 @@ class StreamProcessor:
                                     continue
                                 if part == "<think>":
                                     in_think = True
-                                    if show_thinking:
+                                    if use_reasoning_format:
+                                        # reasoning 格式：跳过标签，开始收集推理内容
+                                        continue
+                                    elif show_thinking:
+                                        # <think> 标签格式：输出标签
                                         formatted_response = MessageProcessor.create_chat_completion_chunk(
                                             part, context.model
                                         )
                                         yield f"data: {json.dumps(formatted_response)}\n\n"
                                     continue
+                                    
                                 if part == "</think>":
-                                    if show_thinking:
+                                    in_think = False
+                                    if use_reasoning_format:
+                                        # reasoning 格式：跳过标签
+                                        continue
+                                    elif show_thinking:
+                                        # <think> 标签格式：输出标签
                                         formatted_response = MessageProcessor.create_chat_completion_chunk(
                                             part, context.model
                                         )
                                         yield f"data: {json.dumps(formatted_response)}\n\n"
-                                    in_think = False
                                     continue
 
-                                if in_think and show_thinking:
-                                    # Per-character streaming inside think
-                                    for ch in part:
-                                        if not ch:
-                                            continue
-                                        formatted_response = MessageProcessor.create_chat_completion_chunk(
-                                            ch, context.model
-                                        )
-                                        yield f"data: {json.dumps(formatted_response)}\n\n"
+                                if in_think:
+                                    if use_reasoning_format:
+                                        # reasoning 格式：收集推理内容
+                                        reasoning_buffer.append(part)
+                                        if show_thinking:
+                                            # 输出到 reasoning_content 字段
+                                            for ch in part:
+                                                if not ch:
+                                                    continue
+                                                formatted_response = MessageProcessor.create_chat_completion_chunk_reasoning(
+                                                    ch, context.model
+                                                )
+                                                yield f"data: {json.dumps(formatted_response)}\n\n"
+                                    elif show_thinking:
+                                        # <think> 标签格式：按字符流式输出到 content
+                                        for ch in part:
+                                            if not ch:
+                                                continue
+                                            formatted_response = MessageProcessor.create_chat_completion_chunk(
+                                                ch, context.model
+                                            )
+                                            yield f"data: {json.dumps(formatted_response)}\n\n"
                                 else:
+                                    # 非思考内容：输出到 content 字段
                                     formatted_response = MessageProcessor.create_chat_completion_chunk(
                                         part, context.model
                                     )
@@ -4147,14 +4250,14 @@ class StreamProcessor:
                         image_content = context.image_handler.handle_image_response(
                             result.image_url, context.cookie, context.proxy_url
                         )
-                        # For streaming, send image content in chunks
+                        # 流式：分块发送图片内容
                         _chunk_size = 4096
                         for _i in range(0, len(image_content), _chunk_size):
                             formatted_response = MessageProcessor.create_chat_completion_chunk(
                                 image_content[_i:_i+_chunk_size], context.model
                             )
                             yield f"data: {json.dumps(formatted_response)}\n\n"
-                        # For non-imageGen models, ignore image urls to avoid unintended image fetching
+                        # 非 imageGen 模型忽略图片 URL，避免意外拉取
                         continue
 
                 except json.JSONDecodeError:
@@ -4212,11 +4315,11 @@ class StreamProcessor:
 
 
 class MessageProcessor:
-    """Creates properly formatted chat completion responses."""
+    """构造标准格式的 Chat Completion 响应。"""
 
     @staticmethod
     def create_chat_completion(message: str, model: str) -> Dict[str, Any]:
-        """Create a complete chat completion response."""
+        """创建完整的 chat.completion 响应。"""
         return {
             "id": f"chatcmpl-{uuid.uuid4()}",
             "object": "chat.completion",
@@ -4234,7 +4337,7 @@ class MessageProcessor:
 
     @staticmethod
     def create_chat_completion_with_content(content: Any, model: str) -> Dict[str, Any]:
-        """Create a complete chat completion response with content array support."""
+        """创建包含 content 数组的完整响应。"""
         return {
             "id": f"chatcmpl-{uuid.uuid4()}",
             "object": "chat.completion",
@@ -4252,7 +4355,7 @@ class MessageProcessor:
 
     @staticmethod
     def create_chat_completion_chunk(message: str, model: str) -> Dict[str, Any]:
-        """Create a streaming chat completion chunk."""
+        """创建流式分片（content 增量）。"""
         return {
             "id": f"chatcmpl-{uuid.uuid4()}",
             "object": "chat.completion.chunk",
@@ -4265,11 +4368,7 @@ class MessageProcessor:
     def create_chat_completion_with_reasoning(
         content: str, reasoning: str, model: str
     ) -> Dict[str, Any]:
-        """Create a complete chat completion response with separate reasoning content.
-
-        Note: Adds a non-standard "reasoning" field on the message for UI use.
-        Clients ignoring unknown fields remain compatible.
-        """
+        """创建带独立 reasoning_content 字段的完整响应（类似 OpenAI o1 格式）。"""
         return {
             "id": f"chatcmpl-{uuid.uuid4()}",
             "object": "chat.completion",
@@ -4281,7 +4380,7 @@ class MessageProcessor:
                     "message": {
                         "role": "assistant",
                         "content": content,
-                        "reasoning": reasoning,
+                        "reasoning_content": reasoning,
                     },
                     "finish_reason": "stop",
                 }
@@ -4291,23 +4390,20 @@ class MessageProcessor:
 
     @staticmethod
     def create_chat_completion_chunk_reasoning(message: str, model: str) -> Dict[str, Any]:
-        """Create a streaming chat completion chunk with reasoning delta.
-
-        This adds a non-standard "reasoning" delta field alongside OpenAI-like chunks.
-        """
+        """创建带 reasoning_content 增量的流式分片（类似 OpenAI o1 格式）。"""
         return {
             "id": f"chatcmpl-{uuid.uuid4()}",
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
-            "choices": [{"index": 0, "delta": {"reasoning": message}}],
+            "choices": [{"index": 0, "delta": {"reasoning_content": message}}],
         }
 
     @staticmethod
     def create_chat_completion_chunk_with_content(
         content: Any, model: str
     ) -> Dict[str, Any]:
-        """Create a streaming chat completion chunk with content array support."""
+        """创建支持 content 数组的流式分片。"""
         return {
             "id": f"chatcmpl-{uuid.uuid4()}",
             "object": "chat.completion.chunk",
@@ -4318,7 +4414,7 @@ class MessageProcessor:
 
     @staticmethod
     def create_error_response(error_message: str) -> Dict[str, Any]:
-        """Create an error response."""
+        """创建错误响应。"""
         return {
             "id": f"chatcmpl-{uuid.uuid4()}",
             "object": "chat.completion.chunk",
@@ -4328,17 +4424,17 @@ class MessageProcessor:
 
 
 class AuthenticationService:
-    """Handles authentication and authorization."""
+    """处理鉴权与授权。"""
 
     def __init__(
         self, config: ConfigurationManager, token_manager: ThreadSafeTokenManager
     ):
-        """Initialize authentication service."""
+        """初始化鉴权服务。"""
         self.config = config
         self.token_manager = token_manager
 
     def validate_api_key(self, auth_header: Optional[str]) -> str:
-        """Validate API key from authorization header."""
+        """从 Authorization 头解析并校验 API Key。"""
         if not auth_header:
             raise ValidationException("Authorization header missing")
 
@@ -4349,7 +4445,7 @@ class AuthenticationService:
         return auth_token
 
     def process_authentication(self, auth_header: Optional[str]) -> bool:
-        """Process authentication and add token if needed."""
+        """完成鉴权流程，必要时附加 token。"""
         try:
             auth_token = self.validate_api_key(auth_header)
 
@@ -4383,7 +4479,7 @@ class AuthenticationService:
 
 
 def create_app(config: ConfigurationManager) -> Flask:
-    """Create and configure Flask application."""
+    """创建并配置 Flask 应用。"""
     app = Flask(__name__)
 
     app.config["SECRET_KEY"] = secrets.token_urlsafe(32)
@@ -4398,13 +4494,12 @@ def create_app(config: ConfigurationManager) -> Flask:
     def create_error_response(
         error_data: Union[str, Dict[str, Any]], status_code: int
     ) -> Tuple[Dict[str, Any], int]:
-        """Create consistent error responses."""
+        """创建统一格式的错误响应。"""
         return UtilityFunctions.create_structured_error_response(
             error_data, status_code
         )
 
-    # Background updater: after each model request, query upstream rate-limits and
-    # persist the authoritative remainingTokens into token_status.json.
+    # 后台更新器：每次请求后调用上游限额接口，并将准确的剩余额度写入 token_status.json
     def _update_rate_limits_async(
         cookie: Optional[str], used_token: Optional[str], model_name: str, proxy_url: Optional[str]
     ) -> None:
@@ -4413,7 +4508,33 @@ def create_app(config: ConfigurationManager) -> Flask:
 
         def worker():
             try:
-                # Prefer the same proxy used for the request; fall back to configured static/dynamic
+                # 先更新模型统计（计数）
+                try:
+                    credential = TokenCredential(used_token, TokenType.NORMAL)
+                    sso_value = credential.extract_sso_value()
+                    
+                    with token_manager._lock:
+                        if sso_value in token_manager._token_status:
+                            token_data = token_manager._token_status[sso_value]
+                            model_stats = token_data.get("modelStats", {})
+                            
+                            # 初始化模型统计（若不存在）
+                            if model_name not in model_stats:
+                                model_stats[model_name] = {
+                                    "lastCallTime": None,
+                                    "requestCount": 0,
+                                    "failureCount": 0,
+                                    "lastFailureTime": None,
+                                    "lastFailureResponse": None
+                                }
+                            
+                            # 更新调用时间和请求计数
+                            model_stats[model_name]["lastCallTime"] = int(time.time() * 1000)
+                            model_stats[model_name]["requestCount"] += 1
+                except Exception as e:
+                    print(f"Failed to update model stats: {e}")
+                
+                # 优先复用本次请求使用的代理；否则回退到静态/动态配置
                 proxy = proxy_url or config.get("API.PROXY")
                 if not proxy and config.get("API.DYNAMIC_PROXY_API"):
                     try:
@@ -4422,7 +4543,7 @@ def create_app(config: ConfigurationManager) -> Flask:
                     except Exception:
                         proxy = None
                 proxy_config = UtilityFunctions.get_proxy_configuration(proxy)
-                print(f"rate-limits model: {model_name}")
+                
                 payload = {"requestKind": "DEFAULT", "modelName": model_name}
                 resp = curl_requests.post(
                     f"{config.get('API.BASE_URL')}/rest/rate-limits",
@@ -4460,39 +4581,39 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.errorhandler(ValidationException)
     def handle_validation_error(e: ValidationException) -> Tuple[Dict[str, Any], int]:
-        """Handle validation exceptions."""
+        """处理校验异常。"""
         return create_error_response(
             {"error": str(e), "error_code": "VALIDATION_ERROR"}, 400
         )
 
     @app.errorhandler(TokenException)
     def handle_token_error(e: TokenException) -> Tuple[Dict[str, Any], int]:
-        """Handle token-related exceptions."""
+        """处理 Token 异常。"""
         return create_error_response(
             {"error": str(e), "error_code": "TOKEN_ERROR"}, 429
         )
 
     @app.errorhandler(RateLimitException)
     def handle_rate_limit_error(e: RateLimitException) -> Tuple[Dict[str, Any], int]:
-        """Handle rate limiting exceptions."""
+        """处理限流异常。"""
         return create_error_response(
             {"error": str(e), "error_code": "RATE_LIMIT_ERROR"}, 429
         )
 
     @app.errorhandler(GrokApiException)
     def handle_grok_api_error(e: GrokApiException) -> Tuple[Dict[str, Any], int]:
-        """Handle Grok API exceptions."""
+        """处理 Grok API 异常。"""
         return create_error_response({"error": str(e), "error_code": e.error_code}, 500)
 
     @app.errorhandler(500)
     def handle_internal_error(e) -> Tuple[Dict[str, Any], int]:
-        """Handle internal server errors."""
+        """处理服务端内部错误。"""
         print(f"Internal server error: {e}")
         return create_error_response("Internal server error", 500)
 
     @app.route("/v1/chat/completions", methods=["POST"])
     def chat_completions():
-        """Main chat completions endpoint with clean separation of concerns."""
+        """兼容 OpenAI 的 Chat Completions 入口（职责分离）。"""
         response_status_code = None
 
         try:
@@ -4515,11 +4636,11 @@ def create_app(config: ConfigurationManager) -> Flask:
             if not messages:
                 raise ValidationException("Messages parameter is required")
 
-            print(f"Processing chat completion request for model: {model}")
+            
 
             payload = grok_client.prepare_chat_request(data)
 
-            # Get normalized model name for rate-limits API calls
+            # 计算用于限额查询的规范化模型名
             normalized_model = grok_client.validate_model_and_request(model, data)
 
             response = None
@@ -4538,28 +4659,79 @@ def create_app(config: ConfigurationManager) -> Flask:
                         break
                     elif response.status_code == 429:
                         print("Rate limited (429)")
-                        # If using dynamic proxy (i.e. no static PROXY configured), rotate proxy
+                        # 若使用动态代理（未配置静态 PROXY），尝试轮换代理
                         try:
                             if not config.get("API.PROXY") and config.get("API.DYNAMIC_PROXY_API") and used_proxy_url:
                                 pm = get_proxy_manager(config)
                                 pm.invalidate_current(used_proxy_url)
                                 print("Rate limited (429), rotating dynamic proxy")
                         except Exception:
-                            # Ignore proxy rotation errors and try token rotation below
+                            # 忽略代理轮换失败，继续尝试轮换 token
                             pass
 
-                        # Always try to rotate token when we have more than one
+                        # 若存在多个 token，始终尝试轮换 token
                         if token_manager.get_token_count_for_model(model) > 1:
                             try:
-                                token_manager.rotate_token(model, used_token)
-                                # 触发状态更新以同步最新的限流信息
+                                # 先同步更新被限流token的状态
                                 if used_token:
                                     cookie = f"{used_token};{config.get('SERVER.CF_CLEARANCE', '')}"
-                                    _update_rate_limits_async(cookie, used_token, normalized_model, used_proxy_url)
-                                    print("Triggered rate-limits update for 429 token")
+                                    # 同步调用rate-limits API获取准确状态
+                                    proxy = used_proxy_url or config.get("API.PROXY")
+                                    if not proxy and config.get("API.DYNAMIC_PROXY_API"):
+                                        try:
+                                            pm = get_proxy_manager(config)
+                                            proxy = pm.get_working_proxy()
+                                        except Exception:
+                                            proxy = None
+                                    proxy_config = UtilityFunctions.get_proxy_configuration(proxy)
+
+                                    try:
+                                        rate_limits_payload = {"requestKind": "DEFAULT", "modelName": normalized_model}
+                                        resp = curl_requests.post(
+                                            f"{config.get('API.BASE_URL')}/rest/rate-limits",
+                                            headers={
+                                                **get_dynamic_headers("POST", "/rest/rate-limits", config),
+                                                "Cookie": cookie,
+                                            },
+                                            json=rate_limits_payload,
+                                            impersonate="chrome133a",
+                                            timeout=10,  # 较短超时，快速获取状态
+                                            **proxy_config,
+                                        )
+                                        print(f"Rate-limits API response status: {resp.status_code}")
+                                        if resp.status_code == 200:
+                                            data = resp.json() if hasattr(resp, "json") else None
+                                            print(f"Rate-limits API response data: {data}")
+                                            if isinstance(data, dict):
+                                                remaining = int(data.get("remainingTokens", 0))
+                                                total = int(data.get("totalTokens", 80))
+                                                window = data.get("windowSizeSeconds")
+                                                print(f"Parsed values - remaining: {remaining}, total: {total}, window: {window}")
+                                                token_manager.update_token_quota(used_token, remaining, total, window)
+
+                                                # 直接标记为无效，防止立即重用
+                                                sso_value = used_token.split("sso=")[1].split(";")[0]
+                                                if sso_value in token_manager._token_status:
+                                                    token_data = token_manager._token_status[sso_value]
+                                                    token_data["isValid"] = False
+                                                    token_manager._save_token_status()
+
+                                                print(f"Updated 429 token status: {remaining}/{total} and marked as invalid")
+                                            else:
+                                                print(f"Rate-limits API returned non-dict data: {type(data)} - {data}")
+                                        else:
+                                            print(f"Rate-limits API failed with status: {resp.status_code}")
+                                            if hasattr(resp, 'text'):
+                                                print(f"Rate-limits API error response: {resp.text[:500]}")
+                                    except Exception as e:
+                                        print(f"Failed to immediately update 429 token status: {e}")
+
+                                # 然后记录失败统计
+                                token_manager.rotate_token(model, used_token)
+
                             except Exception:
                                 pass
-                            print("Rate limited (429), rotating token and retrying")
+                            print("Rate limited (429), updated token status and retrying")
                             retry_count += 1
                             continue
                         else:
@@ -4617,9 +4789,9 @@ def create_app(config: ConfigurationManager) -> Flask:
             tag_config = config.get("TAG_CONFIG", {})
             content_type_mappings = config.get("CONTENT_TYPE_MAPPINGS", {})
 
-            # Build cookie for asset access using the same token/cf_clearance combo
+            # 构造资源访问用 Cookie（与本次 token/cf_clearance 一致）
             cf_clearance = config.get("SERVER.CF_CLEARANCE", "")
-            cookie = f"{used_token};{cf_clearance}" if used_token and cf_clearance else used_token
+            cookie = build_cookie(used_token, cf_clearance) if used_token else None
 
             context = StreamingContext(
                 model=model,
@@ -4658,15 +4830,28 @@ def create_app(config: ConfigurationManager) -> Flask:
                 response_result = StreamProcessor.process_non_stream_response(
                     response, context
                 )
+                
+                # 根据返回类型构造响应
                 if isinstance(response_result, dict):
-                    formatted_response = response_result
+                    # reasoning 格式：包含 content 和 reasoning_content
+                    if "reasoning_content" in response_result:
+                        formatted_response = MessageProcessor.create_chat_completion_with_reasoning(
+                            response_result["content"],
+                            response_result["reasoning_content"],
+                            model
+                        )
+                    else:
+                        # 其他字典格式（如错误响应）
+                        formatted_response = response_result
                 else:
+                    # 普通字符串：<think> 标签格式
                     formatted_response = MessageProcessor.create_chat_completion(
                         response_result, model
                     )
+                
                 # 非流式请求处理完成后更新额度状态
                 _update_rate_limits_async(cookie, used_token, normalized_model, used_proxy_url)
-                print("Updated rate-limits after non-stream completion")
+                
                 return jsonify(formatted_response)
 
         except (
@@ -4682,12 +4867,12 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/v1/models", methods=["GET"])
     def list_models():
-        """List available models."""
+        """列出可用模型。"""
         models_data = []
         current_time = int(time.time())
 
         for model_key in config.models.keys():
-            # Hide upstream internal id from external listing
+            # 隐藏上游内部 id，不在外部列表展示
             if model_key == "grok-4-mini-thinking-tahoe":
                 continue
             models_data.append(
@@ -4703,20 +4888,20 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/health", methods=["GET"])
     def health_check():
-        """Health check endpoint."""
+        """健康检查接口。"""
         return jsonify(
             {"status": "healthy", "timestamp": int(time.time()), "version": "2.0.0"}
         )
 
     @app.route("/", methods=["GET"])
     def index():
-        """Index page with basic information."""
+        """首页：基础信息。"""
         return jsonify(
             {"message": "Grok API Gateway", "version": "2.0.0", "status": "running"}
         )
 
     def check_admin_auth() -> bool:
-        """Check admin authentication."""
+        """校验管理端登录态。"""
         if not config.get("ADMIN.MANAGER_SWITCH"):
             return False
 
@@ -4727,7 +4912,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/add_token", methods=["POST"])
     def add_token():
-        """Add token endpoint (admin only)."""
+        """新增 token（管理员）。"""
         if not check_admin_auth():
             return jsonify({"error": "Unauthorized"}), 401
 
@@ -4769,7 +4954,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/tokens_info", methods=["GET"])
     def tokens_info():
-        """Get token information (admin only)."""
+        """获取 token 信息（管理员）。"""
         if not check_admin_auth():
             return jsonify({"error": "Unauthorized"}), 401
 
@@ -4790,12 +4975,12 @@ def create_app(config: ConfigurationManager) -> Flask:
             return jsonify({"error": f"Failed to get token info: {e}"}), 500
 
     def check_session_auth() -> bool:
-        """Check session-based authentication for web manager."""
+        """检查基于会话的管理端认证。"""
         return session.get("is_logged_in", False)
 
     @app.route("/manager/login", methods=["GET", "POST"])
     def manager_login():
-        """Manager login page and handler."""
+        """管理端登录页及处理。"""
         if not config.get("ADMIN.MANAGER_SWITCH"):
             return redirect("/")
 
@@ -4810,19 +4995,19 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/manager")
     def manager():
-        """Main manager dashboard."""
+        """管理后台首页。"""
         if not check_session_auth():
             return redirect("/manager/login")
         return render_template("manager.html")
 
     @app.route("/manager/api/get")
     def get_manager_tokens():
-        """Get tokens via manager API."""
+        """通过管理端 API 获取 tokens。"""
         if not check_session_auth():
             return jsonify({"error": "Unauthorized"}), 401
 
         try:
-            # Ensure default quota/counts present for backward compatibility
+            # 兼容旧版：确保默认配额/计数存在
             try:
                 token_manager._ensure_quota_defaults_for_all()
             except Exception:
@@ -4839,7 +5024,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/manager/api/model_stats")
     def get_model_stats():
-        """Get aggregated model usage statistics."""
+        """获取聚合的模型使用统计。"""
         if not check_session_auth():
             return jsonify({"error": "Unauthorized"}), 401
 
@@ -4884,7 +5069,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/manager/api/add", methods=["POST"])
     def add_manager_token():
-        """Add token via manager API."""
+        """通过管理端 API 新增 token。"""
         if not check_session_auth():
             return jsonify({"error": "Unauthorized"}), 401
 
@@ -4914,7 +5099,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/manager/api/delete", methods=["POST"])
     def delete_manager_token():
-        """Delete token via manager API."""
+        """通过管理端 API 删除 token。"""
         if not check_session_auth():
             return jsonify({"error": "Unauthorized"}), 401
 
@@ -4942,7 +5127,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/manager/api/reset_quota", methods=["POST"])
     def reset_quota_manager():
-        """Reset quota for a token or all tokens (manager)."""
+        """重置单个/全部 token 的配额（管理端）。"""
         if not check_session_auth():
             return jsonify({"error": "Unauthorized"}), 401
 
@@ -4972,7 +5157,7 @@ def create_app(config: ConfigurationManager) -> Flask:
             if not sso:
                 return jsonify({"error": "Missing 'sso' or 'all'"}), 400
 
-            # Accept either raw sso value or full token string containing sso=
+            # 支持原始 sso 值或包含 sso= 的完整 token 字符串
             sso_value = sso
             if isinstance(sso, str) and "sso=" in sso:
                 try:
@@ -4992,7 +5177,7 @@ def create_app(config: ConfigurationManager) -> Flask:
             return jsonify({"error": str(e)}), 500
     @app.route("/manager/api/cf_clearance", methods=["POST"])
     def set_cf_clearance():
-        """Set CF clearance via manager API."""
+        """通过管理端 API 设置 CF clearance。"""
         if not check_session_auth():
             return jsonify({"error": "Unauthorized"}), 401
 
@@ -5014,7 +5199,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/get/tokens", methods=["GET"])
     def get_tokens():
-        """Legacy endpoint to get tokens."""
+        """旧版获取 tokens 的接口。"""
         auth_token = request.headers.get("Authorization", "").replace("Bearer ", "")
 
         if config.get("API.IS_CUSTOM_SSO", False):
@@ -5035,7 +5220,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 
     @app.route("/add/token", methods=["POST"])
     def add_token_api():
-        """API endpoint to add tokens (API key auth)."""
+        """通过 API Key 新增 tokens 的接口。"""
         auth_token = request.headers.get("Authorization", "").replace("Bearer ", "")
 
         if config.get("API.IS_CUSTOM_SSO", False):
@@ -5073,7 +5258,7 @@ def create_app(config: ConfigurationManager) -> Flask:
 def initialize_application(
     config: ConfigurationManager, token_manager: ThreadSafeTokenManager
 ) -> None:
-    """Initialize the application with environment tokens."""
+    """使用环境中的 tokens 初始化应用。"""
     tokens_added = 0
 
     sso_tokens = os.environ.get("SSO", "")
@@ -5110,7 +5295,7 @@ def initialize_application(
                 "Initialization",
             )
 
-    # For Statsig Playwright: prefer static PROXY; otherwise dynamic if available
+    # Statsig/Playwright：优先使用静态 PROXY；否则在可用时使用动态代理
     proxy_url = config.get("API.PROXY")
     if not config.get("API.DISABLE_DYNAMIC_HEADERS", False):
         try:
@@ -5122,29 +5307,16 @@ def initialize_application(
                     proxy_url = dyn
         except Exception:
             pass
+        # 初始化 Statsig 管理器
         initialize_statsig_manager(proxy_url=proxy_url)
-        if proxy_url:
-            print(f"StatsigManager initialized with proxy: {proxy_url}")
-        else:
-            print("StatsigManager initialized without proxy")
-
-        try:
-            statsig_manager = get_statsig_manager()
-            real_ip = statsig_manager.check_real_ip_sync()
-            if real_ip and real_ip not in ["error", "failed", "unknown"]:
-                print(f"Playwright real IP address: {real_ip}")
-            else:
-                print(f"Failed to get real IP address: {real_ip}")
-        except Exception as e:
-            print(f"Error checking real IP address: {e}")
     else:
-        print("Dynamic headers disabled - skipping StatsigManager initialization")
+        pass
 
-    print("Application initialization completed")
+    
 
 
 def cleanup_resources():
-    """Clean up browser resources before shutdown"""
+    """进程退出前清理浏览器资源。"""
     global _global_statsig_manager
     if _global_statsig_manager:
         try:
@@ -5155,18 +5327,18 @@ def cleanup_resources():
 
 
 def main():
-    """Main application entry point."""
+    """应用入口。"""
     try:
         config = ConfigurationManager()
-        # Expose external alias and ensure upstream passes through full model id
+        # 暴露外部别名，并确保上游能透传完整模型 id
         try:
-            # Map external model names to full upstream id where needed
+            # 将外部模型名映射为上游完整 id（按需）
             config.set("MODELS.grok-4-fast", "grok-4-mini-thinking-tahoe")
             config.set("MODELS.grok-4-fast-expert", "grok-4-mini-thinking-tahoe")
-            # Preserve full id passthrough for direct usage
+            # 保持完整 id 直通，便于直接使用
             config.set("MODELS.grok-4-mini-thinking-tahoe", "grok-4-mini-thinking-tahoe")
         except Exception as _e:
-            # Non-fatal: fallback to defaults if configuration override fails
+            # 非致命：若覆盖失败则回退到默认配置
             print(f"Model mapping override skipped: {_e}")
 
         token_manager = ThreadSafeTokenManager(config)

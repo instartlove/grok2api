@@ -5,3 +5,4 @@ werkzeug
 loguru
 python-dotenv
 playwright
+pytz

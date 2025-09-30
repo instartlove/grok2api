@@ -5,12 +5,16 @@ WORKDIR /app
 # Use China mirror for Playwright browser downloads
 ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/
 
-# Restore original dependency set, including Playwright.
-RUN pip install --no-cache-dir flask requests curl_cffi werkzeug loguru python-dotenv playwright
+# Copy requirements first for better caching
+COPY requirements.txt .
 
-# Restore Chrome installation to support channel="chrome" usage.
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright browsers
 RUN python -m playwright install --with-deps chrome
 
+# Copy the rest of the application
 COPY . .
 
 ENV PORT=5200
